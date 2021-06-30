@@ -84,6 +84,9 @@ my $NO_HEADER = 0;
 my $ORACLE_SPEED = 0;
 my $ORA2PG_SPEED = 0;
 my $RELATIVE_PATH = 0;
+my $AS_OF_SCN = 0;
+my $OPENGAUSS = 0;
+my $CREATE_OPENGAUSS_PROJECT = '';
 
 my @SCHEMA_ARRAY  = qw( SEQUENCE TABLE PACKAGE VIEW GRANT TRIGGER FUNCTION PROCEDURE TABLESPACE PARTITION TYPE MVIEW DBLINK SYNONYM DIRECTORY );
 my @EXTERNAL_ARRAY  = qw( KETTLE FDW );
@@ -92,6 +95,9 @@ my @TEST_ARRAY  = qw( TEST TEST_VIEW);
 my @SOURCES_ARRAY = qw( PACKAGE VIEW TRIGGER FUNCTION PROCEDURE PARTITION TYPE MVIEW );
 my @DATA_ARRAY    = qw( INSERT COPY );
 my @CAPABILITIES  = qw( QUERY LOAD );
+
+my @OPENGAUSS_SCHEMA_ARRAY = qw( SEQUENCE TABLE PACKAGE VIEW TRIGGER FUNCTION PROCEDURE TABLESPACE TYPE MVIEW DBLINK SYNONYM DIRECTORY );
+my @OPENGAUSS_SOURCES_ARRAY = qw();
 
 my @MYSQL_SCHEMA_ARRAY  = qw( TABLE VIEW GRANT TRIGGER FUNCTION PROCEDURE PARTITION DBLINK );
 my @MYSQL_SOURCES_ARRAY = qw( VIEW TRIGGER FUNCTION PROCEDURE PARTITION );
@@ -140,6 +146,7 @@ GetOptions (
 	'dump_as_csv!' =>\$DUMP_AS_CSV,
 	'dump_as_sheet!' =>\$DUMP_AS_SHEET,
 	'init_project=s' => \$CREATE_PROJECT,
+	'init_project_for_opengauss=s' => \$CREATE_OPENGAUSS_PROJECT,
 	'project_base=s' => \$PROJECT_BASE,
 	'print_header!' => \$PRINT_HEADER,
 	'human_days_limit=i' => \$HUMAN_DAY_LIMIT,
@@ -176,6 +183,16 @@ if ($CREATE_PROJECT) {
 	}
 	print STDERR "Creating project $CREATE_PROJECT.\n";
 	&create_project($CREATE_PROJECT, $PROJECT_BASE);
+	exit 0;
+}
+
+if ($CREATE_OPENGAUSS_PROJECT) {
+	if (!-d "$PROJECT_BASE") {
+		print "FATAL: Project base directory does not exists: $PROJECT_BASE\n";
+		&usage();
+	}
+	print STDERR "Creating project $CREATE_PROJECT.\n";
+	&create_opengauss_project($CREATE_OPENGAUSS_PROJECT, $PROJECT_BASE);
 	exit 0;
 }
 
@@ -444,6 +461,14 @@ Most of the time this is an OOM issue, first try reducing DATA_LIMIT value.
 
 }
 
+sub create_opengauss_project
+{
+	my ($create_project, $project_base) = @_;
+	@SCHEMA_ARRAY = @OPENGAUSS_SCHEMA_ARRAY;
+	@SOURCES_ARRAY = @OPENGAUSS_SOURCES_ARRAY;
+	&create_project($create_project, $project_base);
+}
+
 ####
 # Create a generic project tree
 ####
@@ -664,6 +689,7 @@ IMPORT_SCHEMA=0
 IMPORT_DATA=0
 IMPORT_CONSTRAINTS=0
 NO_DBCHECK=0
+OPENGAUSS=0
 
 
 # Message functions
@@ -691,6 +717,7 @@ usage() {
     echo "    -j cores       number of connection to use to import data or indexes into PostgreSQL"
     echo "    -n schema      comma separated list of schema to create"
     echo "    -o username    owner of the database to create"
+    echo "    -w password    password of specified database owner"
     echo "    -p port        listening port of the PostgreSQL server (default: 5432)"
     echo "    -P cores       number of tables to process at same time for data import"
     echo "    -s             import schema only, do not try to import data"
@@ -698,6 +725,7 @@ usage() {
     echo "    -U username    username to connect to PostgreSQL (default: peer username)"
     echo "    -x             import indexes and constraints after data"
     echo "    -y             reply Yes to all questions for automatic import"
+    echo "    -g             specify that the destination database is openGauss"
     echo
     echo "    -?             print help"
     echo
@@ -735,9 +763,9 @@ import_constraints () {
 	if [ -r "$NAMESPACE/schema/tables/INDEXES_table.sql" ]; then
 		if confirm "Would you like to import indexes from $NAMESPACE/schema/tables/INDEXES_table.sql?" ; then
 			if [ -z "$IMPORT_JOBS" ]; then
-				echo "Running: psql$DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $NAMESPACE/schema/tables/INDEXES_table.sql"
+				echo "Running: $sql$DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $NAMESPACE/schema/tables/INDEXES_table.sql"
 				if [ $DEBUG -eq 0 ]; then
-					psql$DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $NAMESPACE/schema/tables/INDEXES_table.sql
+					$sql$DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $NAMESPACE/schema/tables/INDEXES_table.sql
 					if [ $? -ne 0 ]; then
 						die "can not import indexes."
 					fi
@@ -757,9 +785,9 @@ import_constraints () {
 	if [ -r "$NAMESPACE/schema/tables/CONSTRAINTS_table.sql" ]; then
 		if confirm "Would you like to import constraints from $NAMESPACE/schema/tables/CONSTRAINTS_table.sql?" ; then
 			if [ -z "$IMPORT_JOBS" ]; then
-				echo "Running: psql$DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $NAMESPACE/schema/tables/CONSTRAINTS_table.sql"
+				echo "Running: $sql$DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $NAMESPACE/schema/tables/CONSTRAINTS_table.sql"
 				if [ $DEBUG -eq 0 ]; then
-					psql$DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $NAMESPACE/schema/tables/CONSTRAINTS_table.sql
+					$sql$DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $NAMESPACE/schema/tables/CONSTRAINTS_table.sql
 					if [ $? -ne 0 ]; then
 						die "can not import constraints."
 					fi
@@ -779,9 +807,9 @@ import_constraints () {
 	if [ -r "$NAMESPACE/schema/tables/FKEYS_table.sql" ]; then
 		if confirm "Would you like to import foreign keys from $NAMESPACE/schema/tables/FKEYS_table.sql?" ; then
 			if [ -z "$IMPORT_JOBS" ]; then
-				echo "Running: psql$DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $NAMESPACE/schema/tables/FKEYS_table.sql"
+				echo "Running: $sql$DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $NAMESPACE/schema/tables/FKEYS_table.sql"
 				if [ $DEBUG -eq 0 ]; then
-					psql$DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $NAMESPACE/schema/tables/FKEYS_table.sql
+					$sql$DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $NAMESPACE/schema/tables/FKEYS_table.sql
 					if [ $? -ne 0 ]; then
 						die "can not import foreign keys."
 					fi
@@ -800,9 +828,9 @@ import_constraints () {
 
 	if [ $NO_CONSTRAINTS -eq 1 ] && [ -r "$NAMESPACE/schema/triggers/trigger.sql" ]; then
 		if confirm "Would you like to import TRIGGER from $NAMESPACE/schema/triggers/trigger.sql?" ; then
-			echo "Running: psql --single-transaction $DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $NAMESPACE/schema/triggers/trigger.sql"
+			echo "Running: $sql --single-transaction $DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $NAMESPACE/schema/triggers/trigger.sql"
 			if [ $DEBUG -eq 0 ]; then
-				psql --single-transaction $DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $NAMESPACE/schema/triggers/trigger.sql
+				$sql --single-transaction $DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $NAMESPACE/schema/triggers/trigger.sql
 				if [ $? -ne 0 ]; then
 					die "an error occurs when importing file $NAMESPACE/schema/triggers/trigger.sql."
 				fi
@@ -812,7 +840,7 @@ import_constraints () {
 }
 
 # Command line options
-while getopts "b:d:e:h:j:l:n:o:p:P:t:U:aDfiIsyx?"  opt; do
+while getopts "b:d:e:h:j:l:n:o:w:p:P:t:U:aDfiIsyxg?"  opt; do
     case "$opt" in
 	a) IMPORT_DATA=1;;
 	b) SQL_POST_SCRIPT=$OPTARG;;
@@ -826,6 +854,7 @@ while getopts "b:d:e:h:j:l:n:o:p:P:t:U:aDfiIsyx?"  opt; do
         j) IMPORT_JOBS=" -j $OPTARG";;
         n) DB_SCHEMA=$OPTARG;;
         o) DB_OWNER=$OPTARG;;
+        w) DB_OWNER_PASSWORD=$OPTARG;;
         p) DB_PORT=" -p $OPTARG";;
         P) PARALLEL_TABLES=" -P $OPTARG";;
         s) IMPORT_SCHEMA=1;;
@@ -833,6 +862,7 @@ while getopts "b:d:e:h:j:l:n:o:p:P:t:U:aDfiIsyx?"  opt; do
         U) DB_USER=" -U $OPTARG";;
 	x) IMPORT_INDEXES_AFTER=1;;
         y) AUTORUN=1;;
+        g) OPENGAUSS=1;;
         "?") usage 1;;
         *) die "Unknown error while processing options";;
     esac
@@ -868,18 +898,34 @@ if [ $IMPORT_CONSTRAINTS -eq 1 ]; then
 	exit 0
 fi
 
+if [ "$OPENGAUSS" != "0" ]; then
+	sql="gsql"
+	password="-W $DB_OWNER_PASSWORD"
+else
+	sql="psql"
+	password=""
+fi
+
 # When a PostgreSQL schema list is provided, create them
 if [ $IMPORT_DATA -eq 0 ]; then
 	is_superuser='f'
 	if [ $NO_DBCHECK  -eq 0 ]; then
 		# Create owner user
-		user_exists=`psql -d $DB_NAME$DB_HOST$DB_PORT$DB_USER -Atc "select usename from pg_user where usename='$DB_OWNER';"`
-		is_superuser=`psql -d $DB_NAME$DB_HOST$DB_PORT$DB_USER -Atc "select usesuper from pg_user where usename='$DB_OWNER';"`;
+		user_exists=`$sql -d postgres$DB_HOST$DB_PORT$DB_USER -Atc "select usename from pg_user where usename='$DB_OWNER';"`
+		is_superuser=`$sql -d postgres$DB_HOST$DB_PORT$DB_USER -Atc "select usesuper from pg_user where usename='$DB_OWNER';"`;
 		if [ "a$user_exists" = "a" ]; then
 			if confirm "Would you like to create the owner of the database $DB_OWNER?" ; then
-				echo "Running: createuser$DB_HOST$DB_PORT$DB_USER --no-superuser --no-createrole --no-createdb $DB_OWNER"
+				if [ "$OPENGAUSS" != "0" ]; then
+					echo "Running: gsql$DB_HOST$DB_PORT$DB_USER -d postgres -c \"CREATE USER $DB_OWNER IDENTIFIED BY '$DB_OWNER_PASSWORD';\""
+				else
+					echo "Running: createuser$DB_HOST$DB_PORT$DB_USER --no-superuser --no-createrole --no-createdb $DB_OWNER"
+				fi
 				if [ $DEBUG -eq 0 ]; then
-					createuser$DB_HOST$DB_PORT$DB_USER --no-superuser --no-createrole --no-createdb $DB_OWNER
+					if [ "$OPENGAUSS" != "0" ]; then
+						gsql$DB_HOST$DB_PORT$DB_USER -d postgres -c "CREATE USER $DB_OWNER IDENTIFIED BY '$DB_OWNER_PASSWORD';"
+					else
+						createuser$DB_HOST$DB_PORT$DB_USER --no-superuser --no-createrole --no-createdb $DB_OWNER
+					fi
 					if [ $? -ne 0 ]; then
 						die "can not create user $DB_OWNER."
 					fi
@@ -893,12 +939,20 @@ if [ $IMPORT_DATA -eq 0 ]; then
 		if [ "a$DB_ENCODING" = "a" ]; then
 			DB_ENCODING=" -E UTF8"
 		fi
-		db_exists=`psql -d $DB_NAME$DB_HOST$DB_PORT$DB_USER -Atc "select datname from pg_database where datname='$DB_NAME';"`
+		db_exists=`$sql -d postgres$DB_HOST$DB_PORT$DB_USER -Atc "select datname from pg_database where datname='$DB_NAME';"`
 		if [ "a$db_exists" = "a" ]; then
 			if confirm "Would you like to create the database $DB_NAME?" ; then
-				echo "Running: createdb$DB_HOST$DB_PORT$DB_USER$DB_ENCODING --owner $DB_OWNER $DB_NAME"
+				if [ "$OPENGAUSS" != "0" ]; then
+					echo "Running: gsql$DB_HOST$DB_PORT$DB_USER -d postgres -c \"CREATE DATABASE $DB_NAME OWNER $DB_OWNER ENCODING '${DB_ENCODING:4}';\""
+				else
+					echo "Running: createdb$DB_HOST$DB_PORT$DB_USER$DB_ENCODING --owner $DB_OWNER $DB_NAME"
+				fi
 				if [ $DEBUG -eq 0 ]; then
-					createdb$DB_HOST$DB_PORT$DB_USER$DB_ENCODING --owner $DB_OWNER $DB_NAME
+					if [ "$OPENGAUSS" != "0" ]; then
+						gsql$DB_HOST$DB_PORT$DB_USER -d postgres -c "CREATE DATABASE $DB_NAME OWNER $DB_OWNER ENCODING '${DB_ENCODING:4}';"
+					else
+						createdb$DB_HOST$DB_PORT$DB_USER$DB_ENCODING --owner $DB_OWNER $DB_NAME
+					fi
 					if [ $? -ne 0 ]; then
 						die "can not create database $DB_NAME."
 					fi
@@ -906,16 +960,32 @@ if [ $IMPORT_DATA -eq 0 ]; then
 			fi
 		else
 			if confirm "Would you like to drop the database $DB_NAME before recreate it?" ; then
-				echo "Running: dropdb$DB_HOST$DB_PORT$DB_USER $DB_NAME"
+				if [ "$OPENGAUSS" != "0" ]; then
+					echo "Running: gsql$DB_HOST$DB_PORT$DB_USER -d postgres -c \"DROP DATABASE $DB_NAME;\""
+				else
+					echo "Running: dropdb$DB_HOST$DB_PORT$DB_USER $DB_NAME"
+				fi
 				if [ $DEBUG -eq 0 ]; then
-					dropdb$DB_HOST$DB_PORT$DB_USER $DB_NAME
+					if [ "$OPENGAUSS" != "0" ]; then
+						gsql$DB_HOST$DB_PORT$DB_USER -d postgres -c "DROP DATABASE $DB_NAME;"
+					else
+						dropdb$DB_HOST$DB_PORT$DB_USER $DB_NAME
+					fi
 					if [ $? -ne 0 ]; then
 						die "can not drop database $DB_NAME."
 					fi
 				fi
-				echo "Running: createdb$DB_HOST$DB_PORT$DB_USER$DB_ENCODING --owner $DB_OWNER $DB_NAME"
+				if [ "$OPENGAUSS" != "0" ]; then
+					echo "Running: gsql$DB_HOST$DB_PORT$DB_USER -d postgres -c \"CREATE DATABASE $DB_NAME OWNER $DB_OWNER ENCODING '${DB_ENCODING:4}';\""
+				else
+					echo "Running: createdb$DB_HOST$DB_PORT$DB_USER$DB_ENCODING --owner $DB_OWNER $DB_NAME"
+				fi
 				if [ $DEBUG -eq 0 ]; then
-					createdb$DB_HOST$DB_PORT$DB_USER$DB_ENCODING --owner $DB_OWNER $DB_NAME
+					if ["$OPENGAUSS" != "0" ]; then
+						gsql$DB_HOST$DB_PORT$DB_USER -d postgres -c "CREATE DATABASE $DB_NAME OWNER $DB_OWNER ENCODING '${DB_ENCODING:4}';"
+					else
+						createdb$DB_HOST$DB_PORT$DB_USER$DB_ENCODING --owner $DB_OWNER $DB_NAME
+					fi
 					if [ $? -ne 0 ]; then
 						die "can not create database $DB_NAME."
 					fi
@@ -931,9 +1001,9 @@ if [ $IMPORT_DATA -eq 0 ]; then
 		do
 			lnspace=`echo $enspace | tr '[:upper:]' '[:lower:]'`
 			if confirm "Would you like to create schema $lnspace in database $DB_NAME?" ; then
-				echo "Running: psql$DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -c \"CREATE SCHEMA $lnspace;\""
+				echo "Running: $sql$DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -c \"CREATE SCHEMA $lnspace;\""
 				if [ $DEBUG -eq 0 ]; then
-					psql$DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -c "CREATE SCHEMA $lnspace;"
+					$sql$DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -c "CREATE SCHEMA $lnspace;"
 					if [ $? -ne 0 ]; then
 						die "can not create schema $DB_SCHEMA."
 					fi
@@ -944,14 +1014,19 @@ if [ $IMPORT_DATA -eq 0 ]; then
 		# Change search path of the owner
 		if [ "a$nspace_list" != "a" ]; then
 			if confirm "Would you like to change search_path of the database owner?" ; then
-				echo "Running: psql$DB_HOST$DB_PORT$DB_USER -d $DB_NAME -c \"ALTER ROLE $DB_OWNER SET search_path TO ${nspace_list}public;\""
+				echo "Running: $sql$DB_HOST$DB_PORT$DB_USER -d $DB_NAME -c \"ALTER ROLE $DB_OWNER SET search_path TO ${nspace_list}public;\""
 				if [ $DEBUG -eq 0 ]; then
-					psql$DB_HOST$DB_PORT$DB_USER -d $DB_NAME -c "ALTER ROLE $DB_OWNER SET search_path TO ${nspace_list}public;"
+					$sql$DB_HOST$DB_PORT$DB_USER -d $DB_NAME -c "ALTER ROLE $DB_OWNER SET search_path TO ${nspace_list}public;"
 					if [ $? -ne 0 ]; then
 						die "can not change search_path."
 					fi
 				fi
 			fi
+		fi
+	else
+		if [ "$OPENGAUSS" != "0" ] && [ $NO_DBCHECK -eq 0 ]; then
+			echo "Running: gsql$DB_HOST$DB_PORT$DB_USER -d $DB_NAME -c \"grant create on schema public to $DB_OWNER;\""
+			gsql$DB_HOST$DB_PORT$DB_USER -d $DB_NAME -c "grant create on schema public to $DB_OWNER;"
 		fi
 	fi
 
@@ -971,9 +1046,9 @@ if [ $IMPORT_DATA -eq 0 ]; then
 		ltype=`echo $ltype | sed 's/y$/ie/'`
 		if [ -r "$NAMESPACE/schema/${ltype}s/$ltype.sql" ]; then
 			if confirm "Would you like to import $etype from $NAMESPACE/schema/${ltype}s/$ltype.sql?" ; then
-				echo "Running: psql --single-transaction $DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $NAMESPACE/schema/${ltype}s/$ltype.sql"
+				echo "Running: $sql --single-transaction $DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $NAMESPACE/schema/${ltype}s/$ltype.sql"
 				if [ $DEBUG -eq 0 ]; then
-					psql --single-transaction $DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $NAMESPACE/schema/${ltype}s/$ltype.sql
+					$sql --single-transaction $DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $NAMESPACE/schema/${ltype}s/$ltype.sql
 					if [ $? -ne 0 ]; then
 						die "an error occurs when importing file $NAMESPACE/schema/${ltype}s/$ltype.sql."
 					fi
@@ -982,9 +1057,9 @@ if [ $IMPORT_DATA -eq 0 ]; then
 		fi
 		if [ ! -z "$SQL_POST_SCRIPT" ] && [ $etype = "TABLE" ]; then
 			if confirm "Would you like to execute SQL script $SQL_POST_SCRIPT?" ; then
-				echo "Running: psql --single-transaction $DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $SQL_POST_SCRIPT"
+				echo "Running: $sql --single-transaction $DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $SQL_POST_SCRIPT"
 				if [ $DEBUG -eq 0 ]; then
-					psql --single-transaction $DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $SQL_POST_SCRIPT
+					$sql --single-transaction $DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $SQL_POST_SCRIPT
 					if [ $? -ne 0 ]; then
 						die "an error occurs when importing file $SQL_POST_SCRIPT."
 					fi
@@ -1008,13 +1083,17 @@ if [ $IMPORT_DATA -eq 0 ]; then
 	if [ "$is_superuser" = "t" ]; then
 		q_user=$DB_OWNER
 	fi
+	# use current system user instead if openGauss
+	if [ $OPENGAUSS != '0' ]; then
+		q_user=$USER
+	fi
 
 	# Import objects that need superuser privilege: GRANT and TABLESPACE
 	if [ -r "$NAMESPACE/schema/grants/grant.sql" ]; then
 		if confirm "Would you like to import GRANT from $NAMESPACE/schema/grants/grant.sql?" ; then
-			echo "Running: psql $DB_HOST$DB_PORT -U $q_user -d $DB_NAME -f $NAMESPACE/schema/grants/grant.sql"
+			echo "Running: $sql $DB_HOST$DB_PORT -U $q_user -d $DB_NAME -f $NAMESPACE/schema/grants/grant.sql"
 			if [ $DEBUG -eq 0 ]; then
-				psql $DB_HOST$DB_PORT -U $q_user -d $DB_NAME -f $NAMESPACE/schema/grants/grant.sql
+				$sql $DB_HOST$DB_PORT -U $q_user -d $DB_NAME -f $NAMESPACE/schema/grants/grant.sql
 				if [ $? -ne 0 ]; then
 					die "an error occurs when importing file $NAMESPACE/schema/grants/grant.sql."
 				fi
@@ -1023,9 +1102,9 @@ if [ $IMPORT_DATA -eq 0 ]; then
 	fi
 	if [ -r "$NAMESPACE/schema/tablespaces/tablespace.sql" ]; then
 		if confirm "Would you like to import TABLESPACE from $NAMESPACE/schema/tablespaces/tablespace.sql?" ; then
-			echo "Running: psql $DB_HOST$DB_PORT -U $q_user -d $DB_NAME -f $NAMESPACE/schema/tablespaces/tablespace.sql"
+			echo "Running: $sql $DB_HOST$DB_PORT -U $q_user -d $DB_NAME -f $NAMESPACE/schema/tablespaces/tablespace.sql"
 			if [ $DEBUG -eq 0 ]; then
-				psql $DB_HOST$DB_PORT -U $q_user -d $DB_NAME -f $NAMESPACE/schema/tablespaces/tablespace.sql
+				$sql $DB_HOST$DB_PORT -U $q_user -d $DB_NAME -f $NAMESPACE/schema/tablespaces/tablespace.sql
 				if [ $? -ne 0 ]; then
 					die "an error occurs when importing file $NAMESPACE/schema/tablespaces/tablespace.sql."
 				fi
@@ -1059,9 +1138,9 @@ if [ $IMPORT_SCHEMA -eq 0 ]; then
 	# If data file is present propose to import data
 	if [ -r "$NAMESPACE/data/data.sql" ]; then
 		if confirm "Would you like to import data from $NAMESPACE/data/data.sql?" ; then
-			echo "Running: psql$DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $NAMESPACE/data/data.sql"
+			echo "Running: $sql$DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $NAMESPACE/data/data.sql"
 			if [ $DEBUG -eq 0 ]; then
-				psql$DB_HOST$DB_PORT -U $DB_OWNER -d $DB_NAME -f $NAMESPACE/data/data.sql
+				$sql$DB_HOST$DB_PORT -U $DB_OWNER $password -d $DB_NAME -f $NAMESPACE/data/data.sql
 				if [ $? -ne 0 ]; then
 					die "an error occurs when importing file $NAMESPACE/data/data.sql."
 				fi

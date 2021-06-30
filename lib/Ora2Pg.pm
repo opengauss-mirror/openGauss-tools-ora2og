@@ -38,6 +38,7 @@ use File::Basename;
 use File::Spec qw/ tmpdir /;
 use File::Temp qw/ tempfile /;
 use Benchmark;
+use JSON;
 
 #set locale to LC_NUMERIC C
 setlocale(LC_NUMERIC,"C");
@@ -1177,6 +1178,23 @@ sub _init
 
 	$self->{debug} = 1 if ($AConfig{'DEBUG'} == 1);
 
+	$self->{as_of_scn} = $AConfig{'AS_OF_SCN'} if ($AConfig{'AS_OF_SCN'} > 0);
+
+	$self->{openGauss} = 1 if ($AConfig{'OPENGAUSS'} == 1);
+
+	if ($self->{openGauss})
+	{
+		$self->{output_dir} = '.' if (!$self->{output_dir});
+		my $dir = lc("detail");
+		if (!-d "$dir") {
+			if (not mkdir($dir)) {
+				$self->logit("Fail creating directory detail : $dir - $!\n", 1);
+			} else {
+				$self->logit("Creating directory detail: $dir\n", 1);
+			}
+		}
+	}
+
 	# Set default XML data extract method
 	if (not defined $self->{xml_pretty} || ($self->{xml_pretty} != 0)) {
 		$self->{xml_pretty} = 1;
@@ -1474,6 +1492,7 @@ sub _init
 	# Perl module
 	$self->{plsql_pgsql} = 1 if ($self->{plsql_pgsql} eq '');
 	$self->{plsql_pgsql} = 1 if ($self->{estimate_cost});
+	$self->{plsql_pgsql} = 0 if ($self->{openGauss});
 	if ($self->{plsql_pgsql}) {
 		use Ora2Pg::PLSQL;
 	}
@@ -1570,6 +1589,9 @@ sub _init
 	} else {
 
 		$self->{plsql_pgsql} = 1;
+		if ($self->{openGauss}) {
+			$self->{plsql_pgsql} = 0;
+		}
 
 		if (grep(/^$self->{type}$/, 'TABLE', 'SEQUENCE', 'GRANT', 'TABLESPACE', 'VIEW', 'TRIGGER', 'QUERY', 'FUNCTION','PROCEDURE','PACKAGE','TYPE','SYNONYM', 'DIRECTORY', 'DBLINK','LOAD')) {
 			if ($self->{type} eq 'LOAD') {
@@ -1610,7 +1632,11 @@ sub _init
 			# Partitionned table do not accept NOT VALID constraint
 			if ($self->{pg_supports_partition} && $self->{type} eq 'TABLE') {
 				# Get the list of partition
-				$self->{partitions} = $self->_get_partitions_list();
+				if ($self->{openGauss}) {
+					$self->_partitions();
+				} else {
+					$self->{partitions} = $self->_get_partitions_list();
+				}
 			}
 		} elsif ($self->{type} eq 'VIEW') {
 			$self->_views();
@@ -1633,7 +1659,9 @@ sub _init
 		} elsif ($self->{type} eq 'TABLESPACE') {
 			$self->_tablespaces();
 		} elsif ($self->{type} eq 'PARTITION') {
-			$self->_partitions();
+			if (!$self->{openGauss}) {
+				$self->_partitions();
+			}
 		} elsif ($self->{type} eq 'DBLINK') {
 			$self->_dblinks();
 		} elsif ($self->{type} eq 'DIRECTORY') {
@@ -2335,6 +2363,7 @@ sub _tables
 		$self->{tables}{$t}{table_info}{connection} = $tables_infos{$t}{connection};
 		$self->{tables}{$t}{table_info}{nologging} = $tables_infos{$t}{nologging};
 		$self->{tables}{$t}{table_info}{partitioned} = $tables_infos{$t}{partitioned};
+		$self->{tables}{$t}{table_info}{object_id} = $tables_infos{$t}{object_id};
 		if (exists $tables_infos{$t}{fillfactor}) {
 		    $self->{tables}{$t}{table_info}{fillfactor} = $tables_infos{$t}{fillfactor};
 		}
@@ -3491,6 +3520,7 @@ sub _views
 		$self->{views}{$view}{comment} = $view_infos{$view}{comment};
                 # Retrieve also aliases from views
                 $self->{views}{$view}{alias} = $view_infos{$view}{alias};
+		$self->{views}{$view}{object_id} = $view_infos{$view}{object_id};
 		$i++;
 	}
 
@@ -3531,6 +3561,7 @@ sub _materialized_views
 		$self->{materialized_views}{$table}{rewritable}= $mview_infos{$table}{rewritable};
 		$self->{materialized_views}{$table}{build_mode}= $mview_infos{$table}{build_mode};
 		$self->{materialized_views}{$table}{owner}= $mview_infos{$table}{owner};
+		$self->{materialized_views}{$table}{object_id}= $mview_infos{$table}{object_id};
 		$i++;
 	}
 
@@ -3923,6 +3954,9 @@ sub translate_function
 		$self->logit("Dumping function $fct...\n", 1);
 		if ($self->{file_per_function}) {
 			my $f = "$dirprefix${fct}_$self->{output}";
+			if ($self->{openGauss}) {
+				$f = "$dirprefix$functions{$fct}{object_id}.sql";
+			}
 			$f =~ s/\.(?:gz|bz2)$//i;
 			$self->dump("\\i$self->{psql_relative_path} $f\n");
 			$self->save_filetoupdate_list("ORA2PG_$self->{type}", lc($fct), "$dirprefix${fct}_$self->{output}");
@@ -3937,8 +3971,13 @@ sub translate_function
 
 		if ($self->{file_per_function})
 		{
-			$self->logit("Dumping to one file per function : ${fct}_$self->{output}\n", 1);
-			$fhdl = $self->open_export_file("${fct}_$self->{output}");
+			if ($self->{openGauss}) {
+				$self->logit("Dumping to one file per function : $functions{$fct}{object_id}.sql\n", 1);
+				$fhdl = $self->open_export_file("$functions{$fct}{object_id}.sql");
+			} else {
+				$self->logit("Dumping to one file per function : ${fct}_$self->{output}\n", 1);
+				$fhdl = $self->open_export_file("${fct}_$self->{output}");
+			}
 			$self->set_binmode($fhdl) if (!$self->{compress});
 		}
 		if ($self->{plsql_pgsql})
@@ -3983,6 +4022,9 @@ sub translate_function
 		else
 		{
 			$sql_output .= $functions{$fct}{text} . "\n\n";
+			if ($self->{openGauss}) {
+				$sql_output = "CREATE" . $self->{create_or_replace} . " " . $functions{$fct}{text} . "\n\n";
+			}
 		}
 		$self->_restore_comments(\$sql_output);
 		if ($self->{plsql_pgsql}) {
@@ -4003,7 +4045,11 @@ sub translate_function
 		$sql_header = '' if ($self->{no_header});
 
 		if ($self->{file_per_function}) {
-			$self->dump($sql_header . $sql_output, $fhdl);
+			if ($self->{openGauss}) {
+				$self->dump($sql_output, $fhdl);
+			} else {
+				$self->dump($sql_header . $sql_output, $fhdl);
+			}
 			$self->close_export_file($fhdl);
 			$sql_output = '';
 		}
@@ -4086,6 +4132,11 @@ sub _set_file_header
 	}
 	$sql_header .= "\\set ON_ERROR_STOP ON\n\n" if ($self->{stop_on_error});
 	$sql_header .= "SET check_function_bodies = false;\n\n" if (!$self->{function_check});
+	if ($self->{openGauss}) {
+		foreach my $q (@{$self->{pg_initial_command}}) {
+			$sql_header .= "$q\n";
+		}
+	}
 
 	return $sql_header;
 }
@@ -4118,6 +4169,7 @@ sub export_view
 	%ordered_views = %{$self->{views}};
 	my $count_view = 0;
 	my $PGBAR_REFRESH = set_refresh_count($num_total_view);
+	my %view_detail = ();
 	foreach my $view (sort sort_view_by_iter keys %ordered_views)
 	{
 		$self->logit("\tAdding view $view...\n", 1);
@@ -4130,10 +4182,18 @@ sub export_view
 		if ($self->{file_per_table})
 		{
 			my $file_name = "$dirprefix${view}_$self->{output}";
+			if ($self->{openGauss}) {
+				$file_name = "$dirprefix$self->{views}{$view}{object_id}.sql";
+			}
 			$file_name =~ s/\.(gz|bz2)$//;
 			$self->dump("\\i$self->{psql_relative_path} $file_name\n");
-			$self->logit("Dumping to one file per view : ${view}_$self->{output}\n", 1);
-			$fhdl = $self->open_export_file("${view}_$self->{output}");
+			if ($self->{openGauss}) {
+				$self->logit("Dumping to one file per view : $self->{views}{$view}{object_id}.sql\n", 1);
+				$fhdl = $self->open_export_file("$self->{views}{$view}{object_id}.sql");
+			} else {
+				$self->logit("Dumping to one file per view : ${view}_$self->{output}\n", 1);
+				$fhdl = $self->open_export_file("${view}_$self->{output}");
+			}
 			$self->set_binmode($fhdl) if (!$self->{compress});
 			$self->save_filetoupdate_list("ORA2PG_$self->{type}", lc($view), $file_name);
 		} else {
@@ -4143,6 +4203,10 @@ sub export_view
 		if (!$self->{pg_supports_checkoption}) {
 			$self->{views}{$view}{text} =~ s/\s*WITH\s+CHECK\s+OPTION//is;
 		}
+
+		my %detail = ('id' => $self->{views}{$view}{object_id}, 'schema' => $self->{schema}, 'objectName' => $view, 'type' => 'VIEW');
+		%view_detail = (%view_detail, "$self->{views}{$view}{object_id}" => \%detail);
+
 		# Remove unsupported definitions from the ddl statement
 		$self->{views}{$view}{text} =~ s/\s*WITH\s+READ\s+ONLY//is;
 		$self->{views}{$view}{text} =~ s/\s*OF\s+([^\s]+)\s+(WITH|UNDER)\s+[^\)]+\)//is;
@@ -4240,7 +4304,11 @@ sub export_view
 
 		if ($self->{file_per_table})
 		{
-			$self->dump($sql_header . $sql_output, $fhdl);
+			if ($self->{openGauss}) {
+				$self->dump($sql_output, $fhdl);
+			} else {
+				$self->dump($sql_header . $sql_output, $fhdl);
+			}
 			$self->_restore_comments(\$sql_output);
 			$self->close_export_file($fhdl);
 			$sql_output = '';
@@ -4250,6 +4318,16 @@ sub export_view
 
 	}
 	%ordered_views = ();
+
+	if ($self->{openGauss}) {
+		my $reportFile = new IO::File;
+		my $outfile = "detail/VIEW_DETAIL.json";
+		$reportFile->open(">$outfile") or $self->logit("FATAL: Can't open $outfile: $!\n", 0, 1);
+		$reportFile->autoflush(1) if (defined $reportFile);
+		my $json = encode_json \%view_detail;
+		$self->dump($json, $reportFile);
+		$self->close_export_file($reportFile);
+	}
 
 	if (!$self->{quiet} && !$self->{debug}) {
 		print STDERR $self->progress_bar($i - 1, $num_total_view, 25, '=', 'views', 'end of output.'), "\n";
@@ -4282,7 +4360,7 @@ sub export_mview
 	$self->logit("Add materialized views definition...\n", 1);
 
 	my $nothing = 0;
-	$self->dump($sql_header) if ($self->{file_per_table} && !$self->{pg_dsn});
+	$self->dump($sql_header) if ($self->{file_per_table} && (!$self->{pg_dsn} || $self->{openGauss}));
 	my $dirprefix = '';
 	$dirprefix = "$self->{output_dir}/" if ($self->{output_dir});
 	if ($self->{plsql_pgsql} && !$self->{pg_supports_mview}) {
@@ -4391,25 +4469,39 @@ LANGUAGE plpgsql ;
 	my $num_total_mview = scalar keys %{$self->{materialized_views}};
 	my $count_mview = 0;
 	my $PGBAR_REFRESH = set_refresh_count($num_total_mview);
+	my %mview_detail = ();
 	foreach my $view (sort { $a cmp $b } keys %{$self->{materialized_views}})
 	{
+		my $ddl = '';
 		$self->logit("\tAdding materialized view $view...\n", 1);
 		if (!$self->{quiet} && !$self->{debug} && ($count_mview % $PGBAR_REFRESH) == 0) {
 			print STDERR $self->progress_bar($i, $num_total_mview, 25, '=', 'materialized views', "generating $view" ), "\r";
 		}
 		$count_mview++;
 		my $fhdl = undef;
-		if ($self->{file_per_table} && !$self->{pg_dsn}) {
+		if ($self->{file_per_table} && (!$self->{pg_dsn} || $self->{openGauss})) {
 			my $file_name = "$dirprefix${view}_$self->{output}";
+			if ($self->{openGauss}) {
+				$file_name = "$dirprefix$self->{materialized_views}{$view}{object_id}.sql";
+			}
 			$file_name =~ s/\.(gz|bz2)$//;
 			$self->dump("\\i$self->{psql_relative_path} $file_name\n");
-			$self->logit("Dumping to one file per materialized view : ${view}_$self->{output}\n", 1);
-			$fhdl = $self->open_export_file("${view}_$self->{output}");
+			if ($self->{openGauss}) {
+				$self->logit("Dumping to one file per materialized view : $self->{materialized_views}{$view}{object_id}.sql\n", 1);
+				$fhdl = $self->open_export_file("$self->{materialized_views}{$view}{object_id}.sql");
+			} else {
+				$self->logit("Dumping to one file per materialized view : ${view}_$self->{output}\n", 1);
+				$fhdl = $self->open_export_file("${view}_$self->{output}");
+			}
 			$self->set_binmode($fhdl) if (!$self->{compress});
 			$self->save_filetoupdate_list("ORA2PG_$self->{type}", lc($view), $file_name);
 		} else {
 			$self->save_filetoupdate_list("ORA2PG_$self->{type}", lc($view), "$dirprefix$self->{output}");
 		}
+
+		my %detail = ('id' => $self->{materialized_views}{$view}{object_id}, 'schema' => $self->{schema}, 'objectName' => $view, 'type' => 'MATERIALIZED VIEW');
+		%mview_detail = (%mview_detail, "$self->{materialized_views}{$view}{object_id}" => \%detail);
+
 		if (!$self->{plsql_pgsql}) {
 			$sql_output .= "CREATE MATERIALIZED VIEW $view\n";
 			$sql_output .= "BUILD $self->{materialized_views}{$view}{build_mode}\n";
@@ -4463,14 +4555,29 @@ LANGUAGE plpgsql ;
 						. " OWNER TO " . $self->quote_object_name($owner) . ";\n";
 		}
 
-		if ($self->{file_per_table} && !$self->{pg_dsn}) {
-			$self->dump($sql_header . $sql_output, $fhdl);
+		if ($self->{file_per_table} && (!$self->{pg_dsn} || $self->{openGauss})) {
+			if ($self->{openGauss}) {
+				$self->dump($sql_output, $fhdl);
+			} else {
+				$self->dump($sql_header . $sql_output, $fhdl);
+			}
 			$self->close_export_file($fhdl);
 			$sql_output = '';
 		}
 		$nothing++;
 		$i++;
 	}
+
+	if ($self->{openGauss}) {
+		my $reportFile = new IO::File;
+		my $outfile = "detail/MVIEW_DETAIL.json";
+		$reportFile->open(">$outfile") or $self->logit("FATAL: Can't open $outfile: $!\n", 0, 1);
+		$reportFile->autoflush(1) if (defined $reportFile);
+		my $json = encode_json \%mview_detail;
+		$self->dump($json, $reportFile);
+		$self->close_export_file($reportFile);
+	}
+
 	if (!$self->{quiet} && !$self->{debug}) {
 		print STDERR $self->progress_bar($i - 1, $num_total_mview, 25, '=', 'materialized views', 'end of output.'), "\n";
 	}
@@ -4637,8 +4744,10 @@ sub export_sequence
 	if ($self->{export_schema}) {
 		$sql_output .= "CREATE SCHEMA IF NOT EXISTS " . $self->quote_object_name($self->{pg_schema} || $self->{schema}) . ";\n";
 	}
+	my %seq_detail = ();
 	foreach my $seq (sort { $a->[0] cmp $b->[0] } @{$self->{sequences}})
 	{
+		my $ddl = '';
 		if (!$self->{quiet} && !$self->{debug} && ($count_seq % $PGBAR_REFRESH) == 0) {
 			print STDERR $self->progress_bar($i, $num_total_sequence, 25, '=', 'sequences', "generating $seq->[0]" ), "\r";
 		}
@@ -4650,25 +4759,41 @@ sub export_sequence
 		if ($self->{export_schema} && !$self->{schema}) {
 			$seq->[0] = $seq->[7] . '.' . $seq->[0];
 		}
-		$sql_output .= "CREATE SEQUENCE " . $self->quote_object_name($seq->[0]) . " INCREMENT $seq->[3]";
+
+		my %detail = ('id' => $seq->[8], 'schema' => $self->{schema}, 'objectName' => $seq->[0], 'type' => 'SEQUENCE');
+		%seq_detail = (%seq_detail, "$seq->[8]" => \%detail);
+
+		$ddl .= "CREATE SEQUENCE " . $self->quote_object_name($seq->[0]) . " INCREMENT $seq->[3]";
 		if ($seq->[1] eq '' || $seq->[1] < (-2**63-1)) {
-			$sql_output .= " NO MINVALUE";
+			$ddl .= " NO MINVALUE";
 		} else {
-			$sql_output .= " MINVALUE $seq->[1]";
+			$ddl .= " MINVALUE $seq->[1]";
 		}
 		# Max value lower than start value are not allowed
 		if (($seq->[2] > 0) && ($seq->[2] < $seq->[4])) {
 			$seq->[2] = $seq->[4];
 		}
 		if ($seq->[2] eq '' || $seq->[2] > (2**63-1)) {
-			$sql_output .= " NO MAXVALUE";
+			$ddl .= " NO MAXVALUE";
 		} else {
 			$seq->[2] = 9223372036854775807 if ($seq->[2] > 9223372036854775807);
-			$sql_output .= " MAXVALUE $seq->[2]";
+			$ddl .= " MAXVALUE $seq->[2]";
 		}
-		$sql_output .= " START $seq->[4]";
-		$sql_output .= " CACHE $cache" if ($cache ne '');
-		$sql_output .= "$cycle;\n";
+		$ddl .= " START $seq->[4]";
+		$ddl .= " CACHE $cache" if ($cache ne '');
+		$ddl .= "$cycle;\n";
+
+		if ($self->{openGauss}) {
+			my $fhdl = $self->open_export_file("$seq->[8].sql");
+			$self->set_binmode($fhdl) if (!$self->{compress});
+			$self->dump($ddl, $fhdl);
+			$self->close_export_file($fhdl);
+
+			my $f = "$self->{output_dir}/$seq->[8].sql";
+			$sql_output .= "\\i$self->{psql_relative_path} $f\n";
+		} else {
+			$sql_output .= $ddl;
+		}
 
 		if ($self->{force_owner}) {
 			my $owner = $seq->[7];
@@ -4678,6 +4803,17 @@ sub export_sequence
 		}
 		$i++;
 	}
+
+	if ($self->{openGauss}) {
+		my $reportFile = new IO::File;
+		my $outfile = "detail/SEQUENCE_DETAIL.json";
+		$reportFile->open(">$outfile") or $self->logit("FATAL: Can't open $outfile: $!\n", 0, 1);
+		$reportFile->autoflush(1) if (defined $reportFile);
+		my $json = encode_json \%seq_detail;
+		$self->dump($json, $reportFile);
+		$self->close_export_file($reportFile);
+	}
+
 	if (!$self->{quiet} && !$self->{debug}) {
 		print STDERR $self->progress_bar($i - 1, $num_total_sequence, 25, '=', 'sequences', 'end of output.'), "\n";
 	}
@@ -4777,19 +4913,44 @@ sub export_directory
 	}
 	my $i = 1;
 	my $num_total_directory = scalar keys %{$self->{directory}};
+	my $directory_detail = ();
 
 	foreach my $db (sort { $a cmp $b } keys %{$self->{directory}}) {
-
+		my $ddl = '';
 		if (!$self->{quiet} && !$self->{debug}) {
 			print STDERR $self->progress_bar($i, $num_total_directory, 25, '=', 'directory', "generating $db" ), "\r";
 		}
-		$sql_output .= "INSERT INTO external_file.directories (directory_name,directory_path) VALUES ('$db', '$self->{directory}{$db}{path}');\n";
-		foreach my $owner (keys %{$self->{directory}{$db}{grantee}}) {
-			my $write = 'false';
-			$write = 'true' if ($self->{directory}{$db}{grantee}{$owner} =~ /write/i);
-			$sql_output .= "INSERT INTO external_file.directory_roles(directory_name,directory_role,directory_read,directory_write) VALUES ('$db','" . $self->quote_object_name($owner) . "', true, $write);\n";
+		my %detail = ('id' => $self->{directory}{$db}{object_id}, 'schema' => $self->{schema}, 'objectName' => $db, 'type' => 'DIRECTORY');
+		%directory_detail = (%directory_detail, $self->{directory}{$db}{object_id} => \%detail);
+
+		if ($self->{openGauss}) {
+			$ddl = "CREATE$self->{create_or_replace} DIRECTORY $db AS '$self->{directory}{$db}{path}';\n";
+			my $fhdl = $self->open_export_file("$self->{directory}{$db}{object_id}.sql");
+			$self->set_binmode($fhdl) if (!$self->{compress});
+			$self->dump($ddl, $fhdl);
+			$self->close_export_file($fhdl);
+
+			my $f = "$self->{output_dir}/$self->{directory}{$db}{object_id}.sql";
+			$sql_output .= "\\i$self->{psql_relative_path} $f\n";
+		} else {
+			$sql_output .= "INSERT INTO external_file.directories (directory_name,directory_path) VALUES ('$db', '$self->{directory}{$db}{path}');\n";
+			foreach my $owner (keys %{$self->{directory}{$db}{grantee}}) {
+				my $write = 'false';
+				$write = 'true' if ($self->{directory}{$db}{grantee}{$owner} =~ /write/i);
+				$sql_output .= "INSERT INTO external_file.directory_roles(directory_name,directory_role,directory_read,directory_write) VALUES ('$db','" . $self->quote_object_name($owner) . "', true, $write);\n";
+			}
 		}
 		$i++;
+	}
+
+	if ($self->{openGauss}) {
+		my $reportFile = new IO::File;
+		my $outfile = "detail/DIRECTORY_DETAIL.json";
+		$reportFile->open(">$outfile") or $self->logit("FATAL: Can't open $outfile: $!\n", 0, 1);
+		$reportFile->autoflush(1) if (defined $reportFile);
+		my $json = encode_json \%directory_detail;
+		$self->dump($json, $reportFile);
+		$self->close_export_file($reportFile);
 	}
 	if (!$self->{quiet} && !$self->{debug}) {
 		print STDERR $self->progress_bar($i - 1, $num_total_directory, 25, '=', 'directory', 'end of output.'), "\n";
@@ -4830,6 +4991,7 @@ sub export_trigger
 	my $num_total_trigger = $#{$self->{triggers}} + 1;
 	my $count_trig = 0;
 	my $PGBAR_REFRESH = set_refresh_count($num_total_trigger);
+	my %trigger_detail = ();
 	foreach my $trig (sort {$a->[0] cmp $b->[0]} @{$self->{triggers}})
 	{
 		if (!$self->{quiet} && !$self->{debug} && ($count_trig % $PGBAR_REFRESH) == 0) {
@@ -4837,13 +4999,25 @@ sub export_trigger
 		}
 		$count_trig++;
 		my $fhdl = undef;
+
+		my %detail = ('id' => $trig->[9], 'schema' => $self->{schema}, 'objectName' => $trig->[0], 'type' => 'TRIGGER');
+		%trigger_detail = (%trigger_detail, "$trig->[9]" => \%detail);
+
 		if ($self->{file_per_function})
 		{
 			my $f = "$dirprefix$trig->[0]_$self->{output}";
+			if ($self->{openGauss}) {
+				$f = "$dirprefix$trig->[9].sql";
+			}
 			$f =~ s/\.(?:gz|bz2)$//i;
 			$self->dump("\\i$self->{psql_relative_path} $f\n");
-			$self->logit("Dumping to one file per trigger : $trig->[0]_$self->{output}\n", 1);
-			$fhdl = $self->open_export_file("$trig->[0]_$self->{output}");
+			if ($self->{openGauss}) {
+				$self->logit("Dumping to one file per trigger : $trig->[9].sql\n", 1);
+				$fhdl = $self->open_export_file("$trig->[9].sql");
+			} else {
+				$self->logit("Dumping to one file per trigger : $trig->[0]_$self->{output}\n", 1);
+				$fhdl = $self->open_export_file("$trig->[0]_$self->{output}");
+			}
 			$self->set_binmode($fhdl) if (!$self->{compress});
 			$self->save_filetoupdate_list("ORA2PG_$self->{type}", lc($trig->[0]), "$dirprefix$trig->[0]_$self->{output}");
 		}
@@ -5044,12 +5218,25 @@ sub export_trigger
 		$self->_restore_comments(\$sql_output);
 		if ($self->{file_per_function})
 		{
-			$self->dump($sql_header . $sql_output, $fhdl);
-			$self->close_export_file($fhdl);
+			if ($self->{openGauss}) {
+				$self->dump($sql_output, $fhdl);
+			} else {
+				$self->dump($sql_header . $sql_output, $fhdl);
+			}
 			$sql_output = '';
 		}
 		$nothing++;
 		$i++;
+	}
+
+	if ($self->{openGauss}) {
+		my $reportFile = new IO::File;
+		my $outfile = "detail/TRIGGER_DETAIL.json";
+		$reportFile->open(">$outfile") or $self->logit("FATAL: Can't open $outfile: $!\n", 0, 1);
+		$reportFile->autoflush(1) if (defined $reportFile);
+		my $json = encode_json \%trigger_detail;
+		$self->dump($json, $reportFile);
+		$self->close_export_file($reportFile);
 	}
 	delete $self->{current_trigger_table};
 
@@ -5398,11 +5585,25 @@ sub export_function
 	my $num_chunk = $self->{jobs} || 1;
 	my @fct_group = ();
 	my $i = 0;
+	my %function_detail = ();
 	foreach my $key ( sort keys %{$self->{functions}} )
 	{
 		$fct_group[$i++]{$key} = $self->{functions}{$key};
 		$i = 0 if ($i == $num_chunk);
+		my %detail = ('id' => $self->{functions}{$key}{object_id}, 'schema' => $self->{schema}, 'objectName' => $key, 'type' => 'FUNCTION');
+		%function_detail = (%function_detail, "$self->{functions}{$key}{object_id}" => \%detail);
 	}
+
+	if ($self->{openGauss}) {
+		my $reportFile = new IO::File;
+		my $outfile = "detail/FUNCTION_DETAIL.json";
+		$reportFile->open(">$outfile") or $self->logit("FATAL: Can't open $outfile: $!\n", 0, 1);
+		$reportFile->autoflush(1) if (defined $reportFile);
+		my $json = encode_json \%function_detail;
+		$self->dump($json, $reportFile);
+		$self->close_export_file($reportFile);
+	}
+
 	my $num_cur_fct = 0;
 	for ($i = 0; $i <= $#fct_group; $i++)
 	{
@@ -5610,9 +5811,22 @@ sub export_procedure
 	my $num_chunk = $self->{jobs} || 1;
 	my @fct_group = ();
 	my $i = 0;
+	my %procedure_detail = ();
 	foreach my $key (sort keys %{$self->{procedures}} ) {
 		$fct_group[$i++]{$key} = $self->{procedures}{$key};
 		$i = 0 if ($i == $num_chunk);
+		my %detail = ('id' => $self->{procedures}{$key}{object_id}, 'schema' => $self->{schema}, 'objectName' => $key, 'type' => 'PROCEDURE');
+		%procedure_detail = (%procedure_detail, "$self->{procedures}{$key}{object_id}" => \%detail);
+	}
+
+	if ($self->{openGauss}) {
+		my $reportFile = new IO::File;
+		my $outfile = "detail/PROCEDURE_DETAIL.json";
+		$reportFile->open(">$outfile") or $self->logit("FATAL: Can't open $outfile: $!\n", 0, 1);
+		$reportFile->autoflush(1) if (defined $reportFile);
+		my $json = encode_json \%procedure_detail;
+		$self->dump($json, $reportFile);
+		$self->close_export_file($reportFile);
 	}
 	my $num_cur_fct = 0;
 	for ($i = 0; $i <= $#fct_group; $i++) {
@@ -5795,6 +6009,8 @@ sub export_package
 	my $number_fct = 0;
 	my $i = 1;
 	my $num_total_package = scalar keys %{$self->{packages}};
+	my %package_detail = ();
+	my %package_body_detail = ();
 	foreach my $pkg (sort keys %{$self->{packages}})
 	{
 		my $total_size = 0;
@@ -5804,6 +6020,12 @@ sub export_package
 			print STDERR $self->progress_bar($i, $num_total_package, 25, '=', 'packages', "generating $pkg" ), "\r";
 		}
 		$i++, next if (!$self->{packages}{$pkg}{text} && !$self->{packages}{$pkg}{desc});
+
+		my %detail1 = ('id' => $self->{packages}{$pkg}{package_object_id}, 'schema' => $self->{schema}, 'objectName' => $pkg, 'type' => 'PACKAGE');
+		%package_detail = (%package_detail, $self->{packages}{$pkg}{package_object_id} => \%detail1);
+
+		my %detail2 = ('id' => $self->{packages}{$pkg}{package_body_object_id}, 'schema' => $self->{schema}, 'objectName' => $pkg, 'type' => 'PACKAGE BODY');
+		%package_body_detail = (%package_body_detail, $self->{packages}{$pkg}{package_body_object_id} => \%detail2);
 
 		# Save and cleanup previous global variables defined in other package
 		if (scalar keys %{$self->{global_variables}})
@@ -5820,7 +6042,7 @@ sub export_package
 		%{$self->{global_variables}} = ();
 		my $pkgbody = '';
 		my $fct_cost = '';
-		if (!$self->{plsql_pgsql})
+		if (!$self->{plsql_pgsql} && !$self->{openGauss})
 		{
 			$self->logit("Dumping package $pkg...\n", 1);
 			if ($self->{file_per_function})
@@ -5852,7 +6074,9 @@ sub export_package
 			if ($self->{estimate_cost}) {
 				$total_size += length($self->{packages}->{$pkg}{text});
 			}
-			$self->_remove_comments(\$self->{packages}{$pkg}{text});
+			if (!$self->{openGauss}) {
+				$self->_remove_comments(\$self->{packages}{$pkg}{text});
+			}
 
 			# Normalyse package creation call
 			$self->{packages}{$pkg}{text} =~ s/CREATE(?:\s+OR\s+REPLACE)?(?:\s+EDITIONABLE|\s+NONEDITIONABLE)?\s+PACKAGE\s+/CREATE OR REPLACE PACKAGE /is;
@@ -5884,7 +6108,9 @@ sub export_package
 				$fct_cost .= "-- Total estimated cost for package $pkg: $cost_value units, " . $self->_get_human_cost($cost_value) . "\n";
 			}
 			$txt = $self->_convert_package($pkg);
-			$self->_restore_comments(\$txt) if (!$self->{file_per_function});
+			if (!$self->{openGauss}) {
+				$self->_restore_comments(\$txt) if (!$self->{file_per_function});
+			}
 			$txt =~ s/(-- REVOKE ALL ON (?:FUNCTION|PROCEDURE) [^;]+ FROM PUBLIC;)/&remove_newline($1)/sge;
 			if (!$self->{file_per_function}) {
 				$self->normalize_function_call(\$txt);
@@ -5913,6 +6139,25 @@ sub export_package
 		$self->{total_pkgcost} += $Ora2Pg::PLSQL::OBJECT_SCORE{'PACKAGE BODY'};
 		$i++;
 	}
+
+	if ($self->{openGauss}) {
+		my $reportFile = new IO::File;
+		my $outfile = "detail/PACKAGE_DETAIL.json";
+		$reportFile->open(">$outfile") or $self->logit("FATAL: Can't open $outfile: $!\n", 0, 1);
+		$reportFile->autoflush(1) if (defined $reportFile);
+		my $json = encode_json \%package_detail;
+		$self->dump($json, $reportFile);
+		$self->close_export_file($reportFile);
+
+		$reportFile = new IO::File;
+		$outfile = "detail/PACKAGE_BODY_DETAIL.json";
+		$reportFile->open(">$outfile") or $self->logit("FATAL: Can't open $outfile: $!\n", 0, 1);
+		$reportFile->autoflush(1) if (defined $reportFile);
+		$json = encode_json \%package_body_detail;
+		$self->dump($json, $reportFile);
+		$self->close_export_file($reportFile);
+	}
+
 	if ($self->{estimate_cost} && $number_fct) {
 		$self->logit("Total number of functions found inside all packages: $number_fct.\n", 1);
 	}
@@ -5995,7 +6240,10 @@ sub export_type
 	}
 	#--------------------------------------------------------
 	my $i = 1;
+	my %type_detail = ();
+	my %type_body_detail = ();
 	foreach my $tpe (sort {$a->{pos} <=> $b->{pos} } @{$self->{types}}) {
+		my $ddl = '';
 		$self->logit("Dumping type $tpe->{name}...\n", 1);
 		if (!$self->{quiet} && !$self->{debug}) {
 			print STDERR $self->progress_bar($i, $#{$self->{types}}+1, 25, '=', 'types', "generating $tpe->{name}" ), "\r";
@@ -6008,11 +6256,50 @@ sub export_type
 			}
 		}
 		$tpe->{code} =~ s/REPLACE type/REPLACE TYPE/;
-		$sql_output .= $tpe->{comment} . $tpe->{code} . "\n";
+		$ddl = $tpe->{comment} . $tpe->{code};
+		my %detail = ();
+		if ($tpe->{type} eq 'TYPE') {
+			%detail = ('id' => $tpe->{pos}, 'schema' => $self->{schema}, 'objectName' => $tpe->{name}, 'type' => 'TYPE');
+			%type_detail = (%type_detail, "$tpe->{pos}" => \%detail);
+		} else {
+			%detail = ('id' => $tpe->{pos}, 'schema' => $self->{schema}, 'objectName' => $tpe->{name}, 'type' => 'TYPE BODY');
+			%type_body_detail = (%type_body_detail, "$tpe->{pos}" => \%detail);
+		}
+
+		if ($self->{openGauss}) {
+			my $fhdl = $self->open_export_file("$tpe->{pos}.sql");
+			$self->set_binmode($fhdl) if (!$self->{compress});
+			$self->dump($ddl, $fhdl);
+			$self->close_export_file($fhdl);
+
+			my $f = "$self->{output_dir}/$tpe->{pos}.sql";
+			$sql_output .= "\\i$self->{psql_relative_path} $f\n";
+		} else {
+			$sql_output .= $ddl . "\n";
+		}
+		
 		$i++;
 	}
 	$self->_restore_comments(\$sql_output);
 	$self->{comment_values} = ();
+
+	if ($self->{openGauss}) {
+		my $reportFile = new IO::File;
+		my $outfile = "detail/TYPE_DETAIL.json";
+		$reportFile->open(">$outfile") or $self->logit("FATAL: Can't open $outfile: $!\n", 0, 1);
+		$reportFile->autoflush(1) if (defined $reportFile);
+		my $json = encode_json \%type_detail;
+		$self->dump($json, $reportFile);
+		$self->close_export_file($reportFile);
+
+		$reportFile = new IO::File;
+		$outfile = "detail/TYPE_BODY_DETAIL.json";
+		$reportFile->open(">$outfile") or $self->logit("FATAL: Can't open $outfile: $!\n", 0, 1);
+		$reportFile->autoflush(1) if (defined $reportFile);
+		$json = encode_json \%type_body_detail;
+		$self->dump($json, $reportFile);
+		$self->close_export_file($reportFile);
+	}
 
 	if (!$self->{quiet} && !$self->{debug}) {
 		print STDERR $self->progress_bar($i - 1, $#{$self->{types}}+1, 25, '=', 'types', 'end of output.'), "\n";
@@ -6874,12 +7161,37 @@ sub export_synonym
 	my $num_total_synonym = scalar keys %{$self->{synonyms}};
 	my $count_syn = 0;
 	my $PGBAR_REFRESH = set_refresh_count($num_total_synonym);
+	my %synonym_detail = ();
 	foreach my $syn (sort { $a cmp $b } keys %{$self->{synonyms}})
 	{
+		my $ddl = '';
 		if (!$self->{quiet} && !$self->{debug} && ($count_syn % $PGBAR_REFRESH) == 0) {
 			print STDERR $self->progress_bar($i, $num_total_synonym, 25, '=', 'synonyms', "generating $syn" ), "\r";
 		}
 		$count_syn++;
+		my %detail = ('id' => $self->{synonyms}{$syn}{object_id}, 'schema' => $self->{schema}, 'objectName' => $syn, 'type' => 'SYNONYMS');
+		%synonym_detail = (%synonym_detail, "$self->{synonyms}{$syn}{object_id}" => \%detail);
+		if ($self->{openGauss}) {
+			$ddl = "CREATE$self->{create_or_replace} SYNONYM " . $self->quote_object_name("$syn") . " FOR ";
+			my $object_name = "$self->{synonyms}{$syn}{table_owner}." if $self->{synonyms}{$syn}{table_owner};
+			$object_name .= "$self->{synonyms}{$syn}{table_name}";
+			$ddl .= $self->quote_object_name($object_name);
+			if ($self->{synonyms}{$syn}{dblink}) {
+				$sql_output .= "-- You need to create foreign table $self->{synonyms}{$syn}{table_owner}.$self->{synonyms}{$syn}{table_name} using foreign server: $self->{synonyms}{$syn}{dblink} (see DBLINK and FDW export type)\n";
+				$ddl .= "\@$self->{synonyms}{$syn}{dblink}";
+			}
+			$ddl .= ";\n";
+			$i++;
+
+			my $fhdl = $self->open_export_file("$self->{synonyms}{$syn}{object_id}.sql");
+			$self->set_binmode($fhdl) if (!$self->{compress});
+			$self->dump($ddl, $fhdl);
+			$self->close_export_file($fhdl);
+
+			my $f = "$self->{output_dir}/$self->{synonyms}{$syn}{object_id}.sql";
+			$sql_output .= "\\i$self->{psql_relative_path} $f\n";
+			next;
+		}
 		if ($self->{synonyms}{$syn}{dblink}) {
 			$sql_output .= "-- You need to create foreign table $self->{synonyms}{$syn}{table_owner}.$self->{synonyms}{$syn}{table_name} using foreign server: $self->{synonyms}{$syn}{dblink} (see DBLINK and FDW export type)\n";
 		}
@@ -6893,6 +7205,17 @@ sub export_synonym
 					. " TO " . $self->quote_object_name($self->{synonyms}{$syn}{owner}) . ";\n\n";
 		$i++;
 	}
+
+	if ($self->{openGauss}) {
+		my $reportFile = new IO::File;
+		my $outfile = "detail/SYNONYM_DETAIL.json";
+		$reportFile->open(">$outfile") or $self->logit("FATAL: Can't open $outfile: $!\n", 0, 1);
+		$reportFile->autoflush(1) if (defined $reportFile);
+		my $json = encode_json \%synonym_detail;
+		$self->dump($json, $reportFile);
+		$self->close_export_file($reportFile);
+	}
+
 	if (!$self->{quiet} && !$self->{debug}) {
 		print STDERR $self->progress_bar($i - 1, $num_total_synonym, 25, '=', 'synonyms', 'end of output.'), "\n";
 	}
@@ -6977,6 +7300,7 @@ sub export_table
 	my $ib = 1;
 	my $count_table = 0;
 	my $PGBAR_REFRESH = set_refresh_count($num_total_table);
+	my %table_detail = ();
 	foreach my $table (sort {
 			if (exists $self->{tables}{$a}{internal_id}) {
 				$self->{tables}{$a}{internal_id} <=> $self->{tables}{$b}{internal_id};
@@ -6985,6 +7309,7 @@ sub export_table
 			}
 		} keys %{$self->{tables}})
 	{
+		my $ddl = '';
 		# Foreign table can not be temporary
 		next if ($self->{type} eq 'FDW' and $self->{tables}{$table}{table_info}{type} =~/ TEMPORARY/);
 
@@ -7011,23 +7336,27 @@ sub export_table
 		if ( ($obj_type eq 'TABLE') && $self->{tables}{$table}{table_info}{nologging} && !$self->{disable_unlogged} ) {
 			$obj_type = 'UNLOGGED ' . $obj_type;
 		}
+
+		my %detail = ('id' => $self->{tables}{$table}{table_info}{object_id}, 'schema' => $self->{schema}, 'objectName' => $table, 'type' => $obj_type, 'numRows' => $self->{tables}{$table}{table_info}{num_rows});
+		%table_detail = (%table_detail, "$self->{tables}{$table}{table_info}{object_id}" => \%detail);
+
 		if (exists $self->{tables}{$table}{table_as}) {
 			if ($self->{plsql_pgsql}) {
 				$self->{tables}{$table}{table_as} = Ora2Pg::PLSQL::convert_plsql_code($self, $self->{tables}{$table}{table_as});
 			}
 			my $withoid = _make_WITH($self->{with_oid}, $self->{tables}{$tbname}{table_info});
-			$sql_output .= "\nCREATE $obj_type $tbname $withoid AS $self->{tables}{$table}{table_as};\n";
-			next;
+			$ddl .= "\nCREATE $obj_type $tbname $withoid AS $self->{tables}{$table}{table_as};\n";
+			goto PRINT;
 		}
 		if (exists $self->{tables}{$table}{truncate_table}) {
-			$sql_output .= "\nTRUNCATE TABLE $tbname;\n";
+			$ddl .= "\nTRUNCATE TABLE $tbname;\n";
 		}
 		my $serial_sequence = '';
 		my $enum_str = '';
 		my @skip_column_check = ();
 		if (exists $self->{tables}{$table}{column_info}) {
 			my $schem = '';
-			$sql_output .= "\nCREATE$foreign $obj_type $tbname (\n";
+			$ddl .= "\nCREATE$foreign $obj_type $tbname (\n";
 
 			# Extract column information following the Oracle position order
 			foreach my $k (sort { 
@@ -7143,16 +7472,16 @@ sub export_table
 				}
 				$type = $self->{'modify_type'}{"\L$table\E"}{"\L$f->[0]\E"} if (exists $self->{'modify_type'}{"\L$table\E"}{"\L$f->[0]\E"});
 				$fname = $self->quote_object_name($fname);
-				$sql_output .= "\t$fname $type";
+				$ddl .= "\t$fname $type";
 				if ($foreign && $self->is_primary_key_column($table, $f->[0])) {
-					 $sql_output .= " OPTIONS (key 'true')";
+					 $ddl .= " OPTIONS (key 'true')";
 				}
 				if (!$f->[3] || ($f->[3] =~ /^N/)) {
 					# smallserial, serial and bigserial use a NOT NULL sequence as default value,
 					# so we don't need to add it here
 					if ($type !~ /serial/) {
 						push(@{$self->{tables}{$table}{check_constraint}{notnull}}, $f->[0]);
-						$sql_output .= " NOT NULL";
+						$ddl .= " NOT NULL";
 					}
 				}
 
@@ -7162,20 +7491,20 @@ sub export_table
 				}
 				if (exists $self->{identity_info}{$f->[8]}{$f->[0]} and $self->{type} ne 'FDW')
 				{
-					$sql_output =~ s/ NOT NULL\s*$//s; # IDENTITY or serial column are NOT NULL by default
+					$ddl =~ s/ NOT NULL\s*$//s; # IDENTITY or serial column are NOT NULL by default
 					if ($self->{pg_supports_identity})
 					{
-						$sql_output =~ s/ [^\s]+$/ bigint/; # Force bigint
-						$sql_output .= " GENERATED $self->{identity_info}{$f->[8]}{$f->[0]}{generation} AS IDENTITY";
-						$sql_output .= " (" . $self->{identity_info}{$f->[8]}{$f->[0]}{options} . ')' if (exists $self->{identity_info}{$f->[8]}{$f->[0]}{options} && $self->{identity_info}{$f->[8]}{$f->[0]}{options} ne '');
+						$ddl =~ s/ [^\s]+$/ bigint/; # Force bigint
+						$ddl .= " GENERATED $self->{identity_info}{$f->[8]}{$f->[0]}{generation} AS IDENTITY";
+						$ddl .= " (" . $self->{identity_info}{$f->[8]}{$f->[0]}{options} . ')' if (exists $self->{identity_info}{$f->[8]}{$f->[0]}{options} && $self->{identity_info}{$f->[8]}{$f->[0]}{options} ne '');
 					}
 					else
 					{
-						$sql_output =~ s/bigint\s*$/bigserial/s;
-						$sql_output =~ s/smallint\s*$/smallserial/s;
-						$sql_output =~ s/(integer|int)\s*$/serial/s;
+						$ddl =~ s/bigint\s*$/bigserial/s;
+						$ddl =~ s/smallint\s*$/smallserial/s;
+						$ddl =~ s/(integer|int)\s*$/serial/s;
 					}
-					$sql_output .= ",\n";
+					$ddl .= ",\n";
 					$sequence_output .= "SELECT ora2pg_upd_autoincrement_seq('$f->[8]','$f->[0]');\n";
 					next;
 				}
@@ -7204,12 +7533,12 @@ sub export_table
 								my $found = 0;
 								foreach my $k (sort {$b cmp $a} %{ $self->{ora_boolean_values} }) {
 									if ($f->[4] =~ /\b$k\b/i) {
-										$sql_output .= " DEFAULT '" . $self->{ora_boolean_values}{$k} . "'";
+										$ddl .= " DEFAULT '" . $self->{ora_boolean_values}{$k} . "'";
 										$found = 1;
 										last;
 									}
 								}
-								$sql_output .= " DEFAULT " . $f->[4] if (!$found);
+								$ddl .= " DEFAULT " . $f->[4] if (!$found);
 							} else {
 								if (($f->[4] !~ /^'/) && ($f->[4] =~ /[^\d\.]/)) {
 									if ($type =~ /CHAR|TEXT|ENUM/i) {
@@ -7259,43 +7588,110 @@ sub export_table
 									}
 								}
 								$f->[4] = 'NULL' if ($f->[4] eq "''" && $type =~ /int|double|numeric/i);
-								$sql_output .= " DEFAULT $f->[4]";
+								$ddl .= " DEFAULT $f->[4]";
 							}
 						}
 					}
 				}
-				$sql_output .= ",\n";
+				$ddl .= ",\n";
 			}
 			if ($self->{pkey_in_create}) {
-				$sql_output .= $self->_get_primary_keys($table, $self->{tables}{$table}{unique_key});
+				$ddl .= $self->_get_primary_keys($table, $self->{tables}{$table}{unique_key});
 			}
-			$sql_output =~ s/,$//;
-			$sql_output .= ')';
+			$ddl =~ s/,$//;
+			$ddl .= ')';
 			if (exists $self->{tables}{$table}{table_info}{on_commit})
 			{
-				$sql_output .= ' ' . $self->{tables}{$table}{table_info}{on_commit};
+				$ddl .= ' ' . $self->{tables}{$table}{table_info}{on_commit};
 			}
 
 			if ($self->{tables}{$table}{table_info}{partitioned} && $self->{pg_supports_partition} && !$self->{disable_partition}) {
-				$sql_output .= " PARTITION BY " . $self->{partitions_list}{"\L$table\E"}{type} . " (";
+				$ddl .= " PARTITION BY " . $self->{partitions_list}{"\L$table\E"}{type} . " (";
 				for (my $j = 0; $j <= $#{$self->{partitions_list}{"\L$table\E"}{columns}}; $j++)
 				{
-					$sql_output .= ', ' if ($j > 0);
-			       		$sql_output .= $self->quote_object_name($self->{partitions_list}{"\L$table\E"}{columns}[$j]);
+					$ddl .= ', ' if ($j > 0);
+			       		$ddl .= $self->quote_object_name($self->{partitions_list}{"\L$table\E"}{columns}[$j]);
 				}
-				$sql_output .= 	")";
+				$ddl .= 	")";
+				if ($self->{openGauss}) {
+					$ddl .= " INTERVAL(" .$self->{partitions_list}{"\L$table\E"}{interval} . ")" if $self->{partitions_list}{"\L$table\E"}{interval};
+					$ddl .= "\n(";
+
+					foreach my $pos (sort {$a <=> $b} keys %{$self->{partitions}{$table}}) {
+						my $part = $self->{partitions}{$table}{$pos}{name};
+						if ($self->{prefix_partition}) {
+							$tb_name = $table . "_" . $part;
+						}
+						else {
+							if ($self->{export_schema} && !$self->{schema} && ($table =~ /^([^\.]+)\./)) {
+								$tb_name = $1 . '.' . $part;
+							}
+							else {
+								$tb_name = $part;
+							}
+						}
+						$ddl .= "\nPARTITION " . $self->quote_object_name($tb_name);
+						for (my $i = 0; $i <= $#{$self->{partitions}{$table}{$pos}{info}}; $i++) {
+							# We received all values for partitonning on multiple column, so get the one at the right indice
+							my $value = Ora2Pg::PLSQL::convert_plsql_code($self, $self->{partitions}{$table}{$pos}{info}[$i]->{value});
+							if ($self->{partitions}{$table}{$pos}{info}[$i]->{type} eq 'LIST')
+							{
+								$check_cond .= " VALUES ($value)";
+							}
+							elsif ($self->{partitions}{$table}{$pos}{info}[$i]->{type} eq 'RANGE')
+							{
+								$check_cond .= " VALUES LESS THAN ($value)";
+								$i += $#{$self->{partitions}{$table}{$pos}{info}};
+							}
+							elsif ($self->{partitions}{$table}{$pos}{info}[$i]->{type} eq 'HASH')
+							{
+								$check_cond .= "";
+								$i += $#{$self->{partitions}{$table}{$pos}{info}};
+							}
+							else
+							{
+								print STDERR "WARNING: Unknown partitioning type $self->{partitions}{$table}{$pos}{info}[$i]->{type}, skipping partitioning of table $table";
+								next;
+							}
+							if ($self->{use_tablespace} && $self->{partitions}{$table}{$pos}{info}[$i]->{tablespace} && !grep(/^$self->{partitions}{$table}{$pos}{info}[$i]->{tablespace}$/i, @{$self->{default_tablespaces}}))
+							{
+								$check_cond .= " TABLESPACE $self->{partitions}{$table}{$pos}{info}[$i]->{tablespace}";
+							}
+							$check_cond .= ",";
+						}
+						$ddl .= $check_cond;
+						$check_cond = '';
+					}
+					if (exists $self->{partitions_default}{$table})
+					{
+						my $tb_name = '';
+						if ($self->{prefix_partition}) {
+							$tb_name = $table . "_" . $self->{partitions_default}{$table};
+						}
+						else
+						{
+							if ($self->{export_schema} && !$self->{schema} && ($table =~ /^([^\.]+)\./)) {
+								$tb_name =  $1 . '.' . $self->{partitions_default}{$table};
+							} else {
+								$tb_name =  $self->{partitions_default}{$table};
+							}
+						}
+						$ddl .= "\nPARTITION " . $self->quote_object_name($tb_name) . " VALUES (DEFAULT),";
+					}
+					$ddl =~ s/,$/)/;
+				}
 			}
 			if ( ($self->{type} ne 'FDW') && (!$self->{external_to_fdw} || (!grep(/^$table$/i, keys %{$self->{external_table}}) && !$self->{tables}{$table}{table_info}{connection})) ) {
 				my $withoid = _make_WITH($self->{with_oid}, $self->{tables}{$table}{table_info});
 				if ($self->{use_tablespace} && $self->{tables}{$table}{table_info}{tablespace} && !grep(/^$self->{tables}{$table}{table_info}{tablespace}$/i, @{$self->{default_tablespaces}})) {
-					$sql_output .= " $withoid TABLESPACE $self->{tables}{$table}{table_info}{tablespace};\n";
+					$ddl .= " $withoid TABLESPACE $self->{tables}{$table}{table_info}{tablespace};\n";
 				} else {
-					$sql_output .= " $withoid;\n";
+					$ddl .= " $withoid;\n";
 				}
 			} elsif ( grep(/^$table$/i, keys %{$self->{external_table}}) ) {
 				my $program = '';
 				$program = ", program '$self->{external_table}{$table}{program}'" if ($self->{external_table}{$table}{program});
-				$sql_output .= " SERVER \L$self->{external_table}{$table}{directory}\E OPTIONS(filename '$self->{external_table}{$table}{directory_path}$self->{external_table}{$table}{location}', format 'csv', delimiter '$self->{external_table}{$table}{delimiter}'$program);\n";
+				$ddl .= " SERVER \L$self->{external_table}{$table}{directory}\E OPTIONS(filename '$self->{external_table}{$table}{directory_path}$self->{external_table}{$table}{location}', format 'csv', delimiter '$self->{external_table}{$table}{delimiter}'$program);\n";
 			} elsif ($self->{is_mysql}) {
 				$schem = "dbname '$self->{schema}'," if ($self->{schema});
 				my $r_server = $self->{fdw_server};
@@ -7304,7 +7700,7 @@ sub export_table
 					$r_server = $1;
 					$r_table = $2;
 				}
-				$sql_output .= " SERVER $r_server OPTIONS($schem table_name '$r_table');\n";
+				$ddl .= " SERVER $r_server OPTIONS($schem table_name '$r_table');\n";
 			} else {
 				my $tmptb = $table;
 				if ($self->{schema}) {
@@ -7312,17 +7708,17 @@ sub export_table
 				} elsif ($tmptb =~ s/^([^\.]+)\.//) {
 					$schem = "schema '$1',";
 				}
-				$sql_output .= " SERVER $self->{fdw_server} OPTIONS($schem table '$tmptb');\n";
+				$ddl .= " SERVER $self->{fdw_server} OPTIONS($schem table '$tmptb');\n";
 			}
 		}
-		$sql_output .= $serial_sequence;
-		$sql_output .= $enum_str;
+		$ddl .= $serial_sequence;
+		$ddl .= $enum_str;
 
 		# Add comments on table
 		if (!$self->{disable_comment} && $self->{tables}{$table}{table_info}{comment})
 		{
 			$self->{tables}{$table}{table_info}{comment} =~ s/'/''/gs;
-			$sql_output .= "COMMENT ON$foreign TABLE $tbname IS E'$self->{tables}{$table}{table_info}{comment}';\n";
+			$ddl .= "COMMENT ON$foreign TABLE $tbname IS E'$self->{tables}{$table}{table_info}{comment}';\n";
 		}
 
 		# Add comments on columns
@@ -7338,7 +7734,7 @@ sub export_table
 					$self->logit("\tReplacing column $f as " . $self->{replaced_cols}{"\L$table\E"}{lc($fname)} . "...\n", 1);
 					$fname = $self->{replaced_cols}{"\L$table\E"}{lc($fname)};
 				}
-				$sql_output .= "COMMENT ON COLUMN " .  $self->quote_object_name("$tbname.$fname") . " IS E'" . $self->{tables}{$table}{column_comments}{$f} .  "';\n";
+				$ddl .= "COMMENT ON COLUMN " .  $self->quote_object_name("$tbname.$fname") . " IS E'" . $self->{tables}{$table}{column_comments}{$f} .  "';\n";
 			}
 		}
 
@@ -7347,13 +7743,13 @@ sub export_table
 		{
 			my $owner = $self->{tables}{$table}{table_info}{owner};
 			$owner = $self->{force_owner} if ($self->{force_owner} ne "1");
-			$sql_output .= "ALTER$foreign $self->{tables}{$table}{table_info}{type} " .  $self->quote_object_name($tbname)
+			$ddl .= "ALTER$foreign $self->{tables}{$table}{table_info}{type} " .  $self->quote_object_name($tbname)
 						. " OWNER TO " .  $self->quote_object_name($owner) . ";\n";
 		}
 		if (exists $self->{tables}{$table}{alter_index} && $self->{tables}{$table}{alter_index})
 		{
 			foreach (@{$self->{tables}{$table}{alter_index}}) {
-				$sql_output .= "$_;\n";
+				$ddl .= "$_;\n";
 			}
 		}
 		my $export_indexes = 1;
@@ -7367,9 +7763,9 @@ sub export_table
 			$fts_indices .= "$fts_idx\n" if ($fts_idx);
 			if (!$self->{file_per_index})
 			{
-				$sql_output .= $indices;
+				$ddl .= $indices;
 				$indices = '';
-				$sql_output .= $fts_indices;
+				$ddl .= $fts_indices;
 				$fts_indices = '';
 			}
 
@@ -7379,7 +7775,7 @@ sub export_table
 			$constraints .= $self->_create_check_constraint($table, $self->{tables}{$table}{check_constraint},$self->{tables}{$table}{field_name}, @skip_column_check);
 			if (!$self->{file_per_constraint})
 			{
-				$sql_output .= $constraints;
+				$ddl .= $constraints;
 				$constraints = '';
 			}
 		}
@@ -7388,11 +7784,46 @@ sub export_table
 		{
 			$obj_type =~ s/UNLOGGED //;
 			foreach (@{$self->{tables}{$table}{alter_table}}) {
-				$sql_output .= "\nALTER $obj_type $tbname $_;\n";
+				$ddl .= "\nALTER $obj_type $tbname $_;\n";
 			}
 		}
 		$ib++;
+
+		if ($self->{openGauss} && $#{$self->{tables}{$table}{foreign_key}} >= 0) {
+			$self->logit("Dumping RI $table...\n", 1);
+			# Add constraint definition
+			if ($self->{type} ne 'FDW') {
+				my $create_all = $self->_create_foreign_keys($table);
+				if ($create_all) {
+					$ddl .= $create_all;
+				}
+			}
+		}
+
+PRINT:
+		if ($self->{openGauss}) {
+			my $fhdl = $self->open_export_file("$self->{tables}{$table}{table_info}{object_id}.sql");
+			$self->set_binmode($fhdl) if (!$self->{compress});
+			$self->dump($ddl, $fhdl);
+			$self->close_export_file($fhdl);
+
+			my $f = "$self->{output_dir}/$self->{tables}{$table}{table_info}{object_id}.sql";
+			$sql_output .= "\\i$self->{psql_relative_path} $f\n";
+		} else {
+			$sql_output .= $ddl;
+		}
 	}
+
+	if ($self->{openGauss}) {
+		my $reportFile = new IO::File;
+		my $outfile = "detail/TABLE_DETAIL.json";
+		$reportFile->open(">$outfile") or $self->logit("FATAL: Can't open $outfile: $!\n", 0, 1);
+		$reportFile->autoflush(1) if (defined $reportFile);
+		my $json = encode_json \%table_detail;
+		$self->dump($json, $reportFile);
+		$self->close_export_file($reportFile);
+	}
+
 	if (!$self->{quiet} && !$self->{debug})
 	{
 		print STDERR $self->progress_bar($ib - 1, $num_total_table, 25, '=', 'tables', 'end of table export.'), "\n";
@@ -7486,22 +7917,24 @@ RETURNS text AS
 	}
 
 	# Dumping foreign key constraints
-	my $fkeys = '';
-	foreach my $table (sort keys %{$self->{tables}})
-	{
-		next if ($#{$self->{tables}{$table}{foreign_key}} < 0);
-		$self->logit("Dumping RI $table...\n", 1);
-		# Add constraint definition
-		if ($self->{type} ne 'FDW') {
-			my $create_all = $self->_create_foreign_keys($table);
-			if ($create_all) {
-				if ($self->{file_per_fkeys}) {
-					$fkeys .= $create_all;
-				} else {
-					if ($self->{file_per_constraint}) {
-						$constraints .= $create_all;
+	if (!$self->{openGauss}) {
+		my $fkeys = '';
+		foreach my $table (sort keys %{$self->{tables}})
+		{
+			next if ($#{$self->{tables}{$table}{foreign_key}} < 0);
+			$self->logit("Dumping RI $table...\n", 1);
+			# Add constraint definition
+			if ($self->{type} ne 'FDW') {
+				my $create_all = $self->_create_foreign_keys($table);
+				if ($create_all) {
+					if ($self->{file_per_fkeys}) {
+						$fkeys .= $create_all;
 					} else {
-						$sql_output .= $create_all;
+						if ($self->{file_per_constraint}) {
+							$constraints .= $create_all;
+						} else {
+							$sql_output .= $create_all;
+						}
 					}
 				}
 			}
@@ -7694,7 +8127,9 @@ sub _get_sql_statements
 	# Process PARTITION only
 	elsif ($self->{type} eq 'PARTITION')
 	{
-		$self->export_partition();
+		if (!$self->{openGauss}) {
+			$self->export_partition();
+		}
 	}
 
 	# Process synonyms only
@@ -8973,6 +9408,26 @@ CREATE TRIGGER $trig_name BEFORE INSERT OR UPDATE
 			{
 				$str .= "CREATE$unique INDEX$concurrently " . $self->quote_object_name("$idxname$self->{indexes_suffix}")
 						. " ON $table ($columns)";
+				if ($self->{openGauss} && $self->{$objtyp}{$tbsaved}{idx_type}{$idx}{partitioned} eq 'YES')
+				{
+					if ($self->{$objtyp}{$tbsaved}{idx_type}{$idx}{locality} && $self->{$objtyp}{$tbsaved}{idx_type}{$idx}{locality} eq 'LOCAL')
+					{
+						$str .= ' LOCAL';
+					}
+					for (my $j = 0; $j <= $#{$self->{$objtyp}{$tbsaved}{idx_type}{$idx}{partitions}}; $j++) {
+						if ($j == 0) {
+							$str .= "(";
+						}
+						$str .= "\nPARTITION $self->{$objtyp}{$tbsaved}{idx_type}{$idx}{partitions}[$j]->{partition_name}";
+						if ($self->{use_tablespace} && $self->{$objtyp}{$tbsaved}{idx_type}{$idx}{partitions}[$j]->{tablespace_name} && !grep(/^$self->{$objtyp}{$tbsaved}{idx_type}{$idx}{partitions}[$j]->{tablespace_name}$/i, @{$self->{default_tablespaces}}))
+						{
+							$str .= " TABLESPACE $self->{$objtyp}{$tbsaved}{idx_type}{$idx}{partitions}[$j]->{tablespace_name}";
+						}
+						$str .= ",";
+
+					}
+					$str =~ s/,$/)/;
+				}
 			}
 			if ($self->{use_tablespace} && $self->{$objtyp}{$tbsaved}{idx_tbsp}{$idx} && !grep(/^$self->{$objtyp}{$tbsaved}{idx_tbsp}{$idx}$/i, @{$self->{default_tablespaces}}))
 			{
@@ -9809,17 +10264,21 @@ END;
 	if ($part_name)
 	{
 		if ($is_subpart) {
-			$alias = "SUBPARTITION($part_name) a";
+			$alias = "SUBPARTITION($part_name)";
 		} else {
-			$alias = "PARTITION($part_name) a";
+			$alias = "PARTITION($part_name)";
 		}
+		$alias .= " AS OF SCN $self->{as_of_scn}" if ($self->{as_of_scn});
+		$alias .= " a";
+	} else {
+		$alias = "AS OF SCN $self->{as_of_scn} a" if ($self->{as_of_scn});
 	}
 	# Force parallelism on Oracle side
 	if ($self->{default_parallelism_degree} > 1)
 	{
 		# Only if the number of rows is upper than PARALLEL_MIN_ROWS
 		$self->{tables}{$table}{table_info}{num_rows} ||= 0;
-		if ($self->{tables}{"\L$table\E"}{table_info}{num_rows} > $self->{parallel_min_rows}) {
+		if ($self->{tables}{$table}{table_info}{num_rows} > $self->{parallel_min_rows}) {
 			$str =~ s#^SELECT #SELECT /*+ FULL(a) PARALLEL(a, $self->{default_parallelism_degree}) */ #;
 		}
 	}
@@ -10925,9 +11384,10 @@ sub _get_indexes
 		$no_mview .= " AND (A.INDEX_OWNER, A.TABLE_NAME) NOT IN (SELECT OWNER, TABLE_NAME FROM ALL_OBJECT_TABLES)";
 		$no_mview = '' if ($self->{type} eq 'MVIEW');
 		$sth = $self->{dbh}->prepare(<<END) or $self->logit("FATAL: " . $self->{dbh}->errstr . "\n", 0, 1);
-SELECT DISTINCT A.INDEX_NAME,A.COLUMN_NAME,B.UNIQUENESS,A.COLUMN_POSITION,B.INDEX_TYPE,B.TABLE_TYPE,B.GENERATED,B.JOIN_INDEX,A.TABLE_NAME,A.INDEX_OWNER,B.TABLESPACE_NAME,B.ITYP_NAME,B.PARAMETERS,A.DESCEND
+SELECT DISTINCT A.INDEX_NAME,A.COLUMN_NAME,B.UNIQUENESS,A.COLUMN_POSITION,B.INDEX_TYPE,B.TABLE_TYPE,B.GENERATED,B.JOIN_INDEX,A.TABLE_NAME,A.INDEX_OWNER,B.TABLESPACE_NAME,B.ITYP_NAME,B.PARAMETERS,A.DESCEND,C.LOCALITY,B.PARTITIONED
 FROM $self->{prefix}_IND_COLUMNS A
 JOIN $self->{prefix}_INDEXES B ON (B.INDEX_NAME=A.INDEX_NAME AND B.OWNER=A.INDEX_OWNER)
+LEFT JOIN $self->{prefix}_PART_INDEXES C ON (B.INDEX_NAME = C.INDEX_NAME AND B.OWNER = C.OWNER)
 WHERE$generated B.TEMPORARY = 'N' $condition $no_mview
 ORDER BY A.COLUMN_POSITION
 END
@@ -10955,6 +11415,12 @@ AND    IE.TABLE_NAME = ?
 AND    IC.TABLE_OWNER = ?
 };
 	my $sth2 = $self->{dbh}->prepare($idxnc);
+
+	my $partitioned_index = qq{SELECT IP.INDEX_NAME, IP.PARTITION_NAME, IP.TABLESPACE_NAME FROM $self->{prefix}_ind_partitions IP
+WHERE IP.INDEX_OWNER = ?
+AND IP.INDEX_NAME = ?
+};
+	my $sth3 = $self->{dbh}->prepare($partitioned_index);
 	my %data = ();
 	my %unique = ();
 	my %idx_type = ();
@@ -10984,7 +11450,7 @@ AND    IC.TABLE_OWNER = ?
 		# Replace function based index type
 		if ( ($row->[4] =~ /FUNCTION-BASED/i) && ($colname =~ /^SYS_NC\d+\$$/) )
 		{
-			$sth2->execute($colname,$save_tb,$row->[-5]) or $self->logit("FATAL: " . $self->{dbh}->errstr . "\n", 0, 1);
+			$sth2->execute($colname,$save_tb,$row->[-7]) or $self->logit("FATAL: " . $self->{dbh}->errstr . "\n", 0, 1);
 			my $nc = $sth2->fetch();
 			$row->[1] = $nc->[0];
 			$row->[1] =~ s/"//g;
@@ -11039,12 +11505,21 @@ AND    IC.TABLE_OWNER = ?
 		if ($row->[4] eq 'BITMAP') {
 			$idx_type{$row->[8]}{$row->[0]}{type} = $row->[4];
 		}
+		$idx_type{$row->[8]}{$row->[0]}{locality} = $row->[14];
+		$idx_type{$row->[8]}{$row->[0]}{partitioned} = $row->[15];
+		if ($row->[15] eq 'YES' && $row->[14] && $row->[14] eq 'LOCAL') {
+			$sth3->execute($row->[-7], $row->[0]) or $self->logit("FATAL: " . $self->{dbh}->errstr . "\n", 0, 1);
+			while (my $row3 = $sth3->fetch) {
+				push(@{$idx_type{$row->[8]}{$row->[0]}{partitions}}, { 'partition_name' => $row3->[1], 'tablespace_name' => $row3->[2] });
+			}
+		}
 		push(@{$data{$row->[8]}{$row->[0]}}, $row->[1]);
 		$index_tablespace{$row->[8]}{$row->[0]} = $row->[10];
 
 	}
 	$sth->finish();
 	$sth2->finish();
+	$sth3->finish();
 
 	return \%unique, \%data, \%idx_type, \%index_tablespace;
 }
@@ -11103,15 +11578,16 @@ sub _get_sequences
 	return Ora2Pg::MySQL::_get_sequences($self) if ($self->{is_mysql});
 
 	# Retrieve all indexes 
-	my $str = "SELECT DISTINCT SEQUENCE_NAME, MIN_VALUE, MAX_VALUE, INCREMENT_BY, LAST_NUMBER, CACHE_SIZE, CYCLE_FLAG, SEQUENCE_OWNER FROM $self->{prefix}_SEQUENCES";
+	my $str = "SELECT DISTINCT s.SEQUENCE_NAME, s.MIN_VALUE, s.MAX_VALUE, s.INCREMENT_BY, s.LAST_NUMBER, s.CACHE_SIZE, s.CYCLE_FLAG, s.SEQUENCE_OWNER, a.OBJECT_ID FROM $self->{prefix}_SEQUENCES s, $self->{prefix}_OBJECTS a";
 	if (!$self->{schema}) {
-		$str .= " WHERE SEQUENCE_OWNER NOT IN ('" . join("','", @{$self->{sysusers}}) . "')";
+		$str .= " WHERE s.SEQUENCE_OWNER NOT IN ('" . join("','", @{$self->{sysusers}}) . "')";
 	} else {
-		$str .= " WHERE SEQUENCE_OWNER = '$self->{schema}'";
+		$str .= " WHERE s.SEQUENCE_OWNER = '$self->{schema}'";
 	}
 	# Exclude sequence used for IDENTITY columns
-	$str .= " AND SEQUENCE_NAME NOT LIKE 'ISEQ\$\$_%'";
-	$str .= $self->limit_to_objects('SEQUENCE', 'SEQUENCE_NAME');
+	$str .= " AND s.SEQUENCE_NAME NOT LIKE 'ISEQ\$\$_%'";
+	$str .= " AND s.SEQUENCE_NAME = a.OBJECT_NAME AND s.SEQUENCE_OWNER = a.OWNER AND a.OBJECT_TYPE = 'SEQUENCE'";
+	$str .= $self->limit_to_objects('SEQUENCE', 's.SEQUENCE_NAME');
 	#$str .= " ORDER BY SEQUENCE_NAME";
 
 
@@ -11253,8 +11729,8 @@ sub _get_directory
 	my ($self) = @_;
 
 	# Retrieve all database link from dba_db_links table
-	my $str = "SELECT d.DIRECTORY_NAME, d.DIRECTORY_PATH, d.OWNER, p.GRANTEE, p.PRIVILEGE FROM $self->{prefix}_DIRECTORIES d, $self->{prefix}_TAB_PRIVS p";
-	$str .= " WHERE d.DIRECTORY_NAME = p.TABLE_NAME";
+	my $str = "SELECT d.DIRECTORY_NAME, d.DIRECTORY_PATH, d.OWNER, p.GRANTEE, p.PRIVILEGE, a.OBJECT_ID FROM $self->{prefix}_DIRECTORIES d, $self->{prefix}_TAB_PRIVS p, $self->{prefix}_OBJECTS a";
+	$str .= " WHERE d.DIRECTORY_NAME = p.TABLE_NAME AND a.OBJECT_NAME = d.DIRECTORY_NAME AND a.OBJECT_TYPE = 'DIRECTORY'";
 	if (!$self->{schema}) {
 		$str .= " AND p.GRANTEE NOT IN ('" . join("','", @{$self->{sysusers}}) . "')";
 	} else {
@@ -11277,6 +11753,7 @@ sub _get_directory
 			$data{$row->[0]}{path} .= '/';
 		}
 		$data{$row->[0]}{grantee}{$row->[3]} .= $row->[4];
+		$data{$row->[0]}{object_id} = $row->[5];
 	}
 	$sth->finish();
 
@@ -11432,19 +11909,19 @@ sub _get_views
 	}
 
 	# Retrieve all views
-	my $str = "SELECT v.VIEW_NAME,v.TEXT,v.OWNER FROM $self->{prefix}_VIEWS v";
-	if (!$self->{export_invalid}) {
-		$str .= ", $self->{prefix}_OBJECTS a";
-	}
+	my $str = "SELECT v.VIEW_NAME,v.TEXT,v.OWNER,a.OBJECT_ID FROM $self->{prefix}_VIEWS v, $self->{prefix}_OBJECTS a WHERE v.view_name = a.object_name and a.object_type = 'VIEW' AND a.OWNER=v.OWNER";
+	# if (!$self->{export_invalid}) {
+	# 	$str .= ", $self->{prefix}_OBJECTS a";
+	# }
 
 	if (!$self->{schema}) {
-		$str .= " WHERE v.OWNER NOT IN ('" . join("','", @{$self->{sysusers}}) . "')";
+		$str .= " AND v.OWNER NOT IN ('" . join("','", @{$self->{sysusers}}) . "')";
 	} else {
-		$str .= " WHERE v.OWNER = '$self->{schema}'";
+		$str .= " AND v.OWNER = '$self->{schema}'";
 	}
 
 	if (!$self->{export_invalid}) {
-		$str .= " AND a.OBJECT_TYPE='VIEW' AND a.STATUS='VALID' AND v.VIEW_NAME=a.OBJECT_NAME AND a.OWNER=v.OWNER";
+		$str .= " AND a.STATUS='VALID'";
 	}
 	$str .= $self->limit_to_objects('VIEW', 'v.VIEW_NAME');
 	#$str .= " ORDER BY v.OWNER,v.VIEW_NAME";
@@ -11497,6 +11974,7 @@ ORDER BY ITER ASC, 2, 3
 		$data{$row->[0]}{text} = $row->[1];
 		$data{$row->[0]}{owner} = $row->[2];
 		$data{$row->[0]}{comment} = $comments{$row->[0]}{comment} || '';
+		$data{$row->[0]}{object_id} = $row->[3];
 		if ($self->{type} ne 'SHOW_REPORT')
 		{
 			@{$data{$row->[0]}{alias}} = $self->_alias_info ($row->[0]);
@@ -11525,16 +12003,16 @@ sub _get_materialized_views
 	return Ora2Pg::MySQL::_get_materialized_views($self) if ($self->{is_mysql});
 
 	# Retrieve all views
-	my $str = "SELECT MVIEW_NAME,QUERY,UPDATABLE,REFRESH_MODE,REFRESH_METHOD,USE_NO_INDEX,REWRITE_ENABLED,BUILD_MODE,OWNER FROM $self->{prefix}_MVIEWS";
+	my $str = "SELECT m.MVIEW_NAME,m.QUERY,m.UPDATABLE,m.REFRESH_MODE,m.REFRESH_METHOD,m.USE_NO_INDEX,m.REWRITE_ENABLED,m.BUILD_MODE,m.OWNER,a.OBJECT_ID FROM $self->{prefix}_MVIEWS m, $self->{prefix}_OBJECTS a WHERE m.MVIEW_NAME = a.OBJECT_NAME AND a.OBJECT_TYPE = 'MATERIALIZED VIEW' AND m.OWNER = a.OWNER";
 	if ($self->{db_version} =~ /Release 8/) {
-		$str = "SELECT MVIEW_NAME,QUERY,UPDATABLE,REFRESH_MODE,REFRESH_METHOD,'',REWRITE_ENABLED,BUILD_MODE,OWNER FROM $self->{prefix}_MVIEWS";
+		$str = "SELECT m.MVIEW_NAME,m.QUERY,m.UPDATABLE,m.REFRESH_MODE,m.REFRESH_METHOD,'',m.REWRITE_ENABLED,m.BUILD_MODE,m.OWNER,a.OBJECT_ID FROM $self->{prefix}_MVIEWS m, $self->{prefix}_OBJECTS a WHERE m.MVIEW_NAME = a.OBJECT_NAME AND a.OBJECT_TYPE = 'MATERIALIZED VIEW' AND m.OWNER = a.OWNER";
 	}
 	if (!$self->{schema}) {
-		$str .= " WHERE OWNER NOT IN ('" . join("','", @{$self->{sysusers}}) . "')";
+		$str .= " AND m.OWNER NOT IN ('" . join("','", @{$self->{sysusers}}) . "')";
 	} else {
-		$str .= " WHERE OWNER = '$self->{schema}'";
+		$str .= " AND m.OWNER = '$self->{schema}'";
 	}
-	$str .= $self->limit_to_objects('MVIEW', 'MVIEW_NAME');
+	$str .= $self->limit_to_objects('MVIEW', 'm.MVIEW_NAME');
 	#$str .= " ORDER BY MVIEW_NAME";
 	my $sth = $self->{dbh}->prepare($str);
 	if (not defined $sth) {
@@ -11558,6 +12036,7 @@ sub _get_materialized_views
 		$data{$row->[0]}{rewritable} = ($row->[6] eq 'Y') ? 1 : 0;
 		$data{$row->[0]}{build_mode} = $row->[7];
 		$data{$row->[0]}{owner} = $row->[8];
+		$data{$row->[0]}{object_id} = $row->[9];
 	}
 
 	return %data;
@@ -11651,11 +12130,11 @@ sub _get_triggers
 	return Ora2Pg::MySQL::_get_triggers($self) if ($self->{is_mysql});
 
 	# Retrieve all indexes 
-	my $str = "SELECT TRIGGER_NAME, TRIGGER_TYPE, TRIGGERING_EVENT, TABLE_NAME, TRIGGER_BODY, WHEN_CLAUSE, DESCRIPTION, ACTION_TYPE, OWNER FROM $self->{prefix}_TRIGGERS WHERE STATUS='ENABLED'";
+	my $str = "SELECT t.TRIGGER_NAME, t.TRIGGER_TYPE, t.TRIGGERING_EVENT, t.TABLE_NAME, t.TRIGGER_BODY, t.WHEN_CLAUSE, t.DESCRIPTION, t.ACTION_TYPE, t.OWNER, a.OBJECT_ID FROM $self->{prefix}_TRIGGERS t, $self->{prefix}_OBJECTS a WHERE t.STATUS='ENABLED' AND t.TRIGGER_NAME = a.OBJECT_NAME AND t.OWNER = a.OWNER AND a.OBJECT_TYPE = 'TRIGGER'";
 	if (!$self->{schema}) {
-		$str .= " AND OWNER NOT IN ('" . join("','", @{$self->{sysusers}}) . "')";
+		$str .= " AND t.OWNER NOT IN ('" . join("','", @{$self->{sysusers}}) . "')";
 	} else {
-		$str .= " AND OWNER = '$self->{schema}'";
+		$str .= " AND t.OWNER = '$self->{schema}'";
 	}
 	$str .= " " . $self->limit_to_objects('TABLE|VIEW|TRIGGER','TABLE_NAME|TABLE_NAME|TRIGGER_NAME');
 
@@ -11931,7 +12410,7 @@ sub _get_functions
 	return Ora2Pg::MySQL::_get_functions($self) if ($self->{is_mysql});
 
 	# Retrieve all functions 
-	my $str = "SELECT DISTINCT OBJECT_NAME,OWNER FROM $self->{prefix}_OBJECTS WHERE OBJECT_TYPE='FUNCTION'";
+	my $str = "SELECT DISTINCT OBJECT_NAME,OWNER,OBJECT_ID FROM $self->{prefix}_OBJECTS WHERE OBJECT_TYPE='FUNCTION'";
 	$str .= " AND STATUS='VALID'" if (!$self->{export_invalid});
 	if (!$self->{schema}) {
 		$str .= " AND OWNER NOT IN ('" . join("','", @{$self->{sysusers}}) . "')";
@@ -11953,6 +12432,7 @@ sub _get_functions
 		next if (grep(/^$row->[0]$/i, @fct_done));
 		push(@fct_done, $row->[0]);
 		$functions{"$row->[0]"}{owner} = $row->[1];
+		$functions{"$row->[0]"}{object_id} = $row->[2];
 	}
 	$sth->finish();
 
@@ -12035,7 +12515,7 @@ sub _get_procedures
 	return Ora2Pg::MySQL::_get_functions($self) if ($self->{is_mysql});
 
 	# Retrieve all functions 
-	my $str = "SELECT DISTINCT OBJECT_NAME,OWNER FROM $self->{prefix}_OBJECTS WHERE OBJECT_TYPE='PROCEDURE'";
+	my $str = "SELECT DISTINCT OBJECT_NAME,OWNER,OBJECT_ID FROM $self->{prefix}_OBJECTS WHERE OBJECT_TYPE='PROCEDURE'";
 	$str .= " AND STATUS='VALID'" if (!$self->{export_invalid});
 	if (!$self->{schema}) {
 		$str .= " AND OWNER NOT IN ('" . join("','", @{$self->{sysusers}}) . "')";
@@ -12057,6 +12537,7 @@ sub _get_procedures
 		next if (grep(/^$row->[0]$/i, @fct_done));
 		push(@fct_done, $row->[0]);
 		$procedures{"$row->[0]"}{owner} = $row->[1];
+		$procedures{"$row->[0]"}{object_id} = $row->[2];
 	}
 	$sth->finish();
 
@@ -12098,7 +12579,7 @@ sub _get_packages
 
 	# Retrieve all indexes 
 	#my $str = "SELECT DISTINCT OBJECT_NAME,OWNER FROM $self->{prefix}_OBJECTS WHERE OBJECT_TYPE = 'PACKAGE BODY'";
-	my $str = "SELECT DISTINCT OBJECT_NAME,OWNER FROM $self->{prefix}_OBJECTS WHERE OBJECT_TYPE = 'PACKAGE'";
+	my $str = "SELECT DISTINCT OBJECT_NAME,OWNER,OBJECT_ID,OBJECT_TYPE FROM $self->{prefix}_OBJECTS WHERE OBJECT_TYPE IN ('PACKAGE', 'PACKAGE BODY')";
 	$str .= " AND STATUS='VALID'" if (!$self->{export_invalid});
 	if (!$self->{schema}) {
 		$str .= " AND OWNER NOT IN ('" . join("','", @{$self->{sysusers}}) . "')";
@@ -12116,6 +12597,12 @@ sub _get_packages
 	while (my $row = $sth->fetch)
 	{
 		$self->logit("\tFound Package: $row->[0]\n", 1);
+		if ($row->[3] eq 'PACKAGE') {
+			$packages{$row->[0]}{package_object_id} = $row->[2];
+		}
+		elsif ($row->[3] eq 'PACKAGE BODY') {
+			$packages{$row->[0]}{package_body_object_id} = $row->[2];
+		}
 		next if (grep(/^$row->[0]$/, @fct_done));
 		push(@fct_done, $row->[0]);
 		# Get package definition first
@@ -12156,7 +12643,7 @@ sub _get_types
 	my ($self, $name) = @_;
 
 	# Retrieve all user defined types
-	my $str = "SELECT DISTINCT OBJECT_NAME,OWNER,OBJECT_ID FROM $self->{prefix}_OBJECTS WHERE OBJECT_TYPE='TYPE'";
+	my $str = "SELECT DISTINCT OBJECT_NAME,OWNER,OBJECT_ID,OBJECT_TYPE FROM $self->{prefix}_OBJECTS WHERE OBJECT_TYPE IN ('TYPE','TYPE BODY')";
 	$str .= " AND STATUS='VALID'" if (!$self->{export_invalid});
 	$str .= " AND OBJECT_NAME='$name'" if ($name);
 	$str .= " AND GENERATED='N'";
@@ -12183,13 +12670,13 @@ sub _get_types
 	while (my $row = $sth->fetch)
 	{
 		next if ($row->[0] =~ /^(SDO_GEOMETRY|ST_|STGEOM_)/);
-		my $sql = "SELECT TEXT FROM $self->{prefix}_SOURCE WHERE OWNER='$row->[1]' AND NAME='$row->[0]' AND (TYPE='TYPE' OR TYPE='TYPE BODY') ORDER BY TYPE, LINE";
+		my $sql = "SELECT TEXT FROM $self->{prefix}_SOURCE WHERE OWNER='$row->[1]' AND NAME='$row->[0]' AND TYPE='$row->[3]' ORDER BY TYPE, LINE";
 		if (!$self->{schema} && $self->{export_schema}) {
 			$row->[0] = "$row->[1].$row->[0]";
 		}
 		$self->logit("\tFound Type: $row->[0]\n", 1);
-		next if (grep(/^$row->[0]$/, @fct_done));
-		push(@fct_done, $row->[0]);
+		next if (grep(/^$row->[0]$row->[3]$/, @fct_done));
+		push(@fct_done, $row->[0] . $row->[3]);
 		my %tmp = ();
 		my $sth2 = $local_dbh->prepare($sql) or $self->logit("FATAL: " . $local_dbh->errstr . "\n", 0, 1);
 		$sth2->execute or $self->logit("FATAL: " . $sth2->errstr . "\n", 0, 1);
@@ -12200,6 +12687,7 @@ sub _get_types
 		$tmp{name} = $row->[0];
 		$tmp{owner} = $row->[1];
 		$tmp{pos} = $row->[2];
+		$tmp{type} = $row->[3];
 		if (!$self->{preserve_case}) {
 			$tmp{code} =~ s/(TYPE\s+)"[^"]+"\."[^"]+"/$1\L$row->[0]\E/is;
 			$tmp{code} =~ s/(TYPE\s+)"[^"]+"/$1\L$row->[0]\E/is;
@@ -12256,7 +12744,7 @@ sub _table_info
 		$sth->finish();
 	}
 
-	my $sql = "SELECT A.OWNER,A.TABLE_NAME,NVL(num_rows,1) NUMBER_ROWS,A.TABLESPACE_NAME,A.NESTED,A.LOGGING,A.PARTITIONED,A.PCT_FREE FROM $self->{prefix}_TABLES A, ALL_OBJECTS O WHERE A.OWNER=O.OWNER AND A.TABLE_NAME=O.OBJECT_NAME AND O.OBJECT_TYPE='TABLE' $owner";
+	my $sql = "SELECT A.OWNER,A.TABLE_NAME,NVL(num_rows,1) NUMBER_ROWS,A.TABLESPACE_NAME,A.NESTED,A.LOGGING,A.PARTITIONED,A.PCT_FREE,O.OBJECT_ID FROM $self->{prefix}_TABLES A, ALL_OBJECTS O WHERE A.OWNER=O.OWNER AND A.TABLE_NAME=O.OBJECT_NAME AND O.OBJECT_TYPE='TABLE' $owner";
 	$sql .= " AND A.TEMPORARY='N' AND (A.NESTED != 'YES' OR A.LOGGING != 'YES') AND A.SECONDARY = 'N'";
 	if ($self->{db_version} !~ /Release [89]/) {
 		$sql .= " AND (A.DROPPED IS NULL OR A.DROPPED = 'NO')";
@@ -12293,6 +12781,7 @@ sub _table_info
 		} else {
 			$tables_infos{$row->[1]}{partitioned} = 1;
 		}
+		$tables_infos{$row->[1]}{object_id} = $row->[8];
 		# Only take care of PCTFREE upper than the Oracle default value
 		if (($row->[7] || 0) > 10) {
 			$tables_infos{$row->[1]}{fillfactor} = 100 - min(90, $row->[7]);
@@ -12755,12 +13244,13 @@ sub _get_synonyms
 	return Ora2Pg::MySQL::_get_synonyms($self) if ($self->{is_mysql});
 
 	# Retrieve all synonym
-	my $str = "SELECT OWNER,SYNONYM_NAME,TABLE_OWNER,TABLE_NAME,DB_LINK FROM $self->{prefix}_SYNONYMS";
+	my $str = "SELECT s.OWNER,s.SYNONYM_NAME,s.TABLE_OWNER,s.TABLE_NAME,s.DB_LINK,a.OBJECT_ID FROM $self->{prefix}_SYNONYMS s, $self->{prefix}_OBJECTS a";
 	if ($self->{schema}) {
-		$str .= " WHERE (owner='$self->{schema}' OR owner='PUBLIC') AND table_owner NOT IN ('" . join("','", @{$self->{sysusers}}) . "') ";
+		$str .= " WHERE (s.owner='$self->{schema}' OR s.owner='PUBLIC') AND (s.table_owner is NULL OR s.table_owner NOT IN ('" . join("','", @{$self->{sysusers}}) . "')) ";
 	} else {
-		$str .= " WHERE (owner='PUBLIC' OR owner NOT IN ('" . join("','", @{$self->{sysusers}}) . "')) AND table_owner NOT IN ('" . join("','", @{$self->{sysusers}}) . "') ";
+		$str .= " WHERE (s.owner='PUBLIC' OR s.owner NOT IN ('" . join("','", @{$self->{sysusers}}) . "')) AND s.table_owner NOT IN ('" . join("','", @{$self->{sysusers}}) . "') ";
 	}
+	$str .= " AND s.SYNONYM_NAME = a.OBJECT_NAME AND s.OWNER = a.OWNER AND a.OBJECT_TYPE = 'SYNONYM'";
 	$str .= $self->limit_to_objects('SYNONYM','SYNONYM_NAME');
 	#$str .= " ORDER BY SYNONYM_NAME\n";
 
@@ -12774,6 +13264,7 @@ sub _get_synonyms
 		$synonyms{$row->[1]}{table_owner} = $row->[2];
 		$synonyms{$row->[1]}{table_name} = $row->[3];
 		$synonyms{$row->[1]}{dblink} = $row->[4];
+		$synonyms{$row->[1]}{object_id} = $row->[5];
 	}
 	$sth->finish;
 
@@ -12865,7 +13356,7 @@ sub _get_partitioned_table
 		$condition .= " AND B.OWNER NOT IN ('" . join("','", @{$self->{sysusers}}) . "') ";
 	}
 	# Retrieve all partitions.
-	my $str = "SELECT B.TABLE_NAME, B.PARTITIONING_TYPE, B.OWNER, B.PARTITION_COUNT, B.SUBPARTITIONING_TYPE";
+	my $str = "SELECT B.TABLE_NAME, B.PARTITIONING_TYPE, B.OWNER, B.PARTITION_COUNT, B.SUBPARTITIONING_TYPE, B.INTERVAL";
 	if ($self->{type} !~ /SHOW|TEST/)
 	{
 		$str .= ", C.COLUMN_NAME, C.COLUMN_POSITION";
@@ -12928,8 +13419,9 @@ sub _get_partitioned_table
 			$parts{"\L$row->[0]\E"}{count} = $row->[3];
 		}
 		$parts{"\L$row->[0]\E"}{type} = $row->[1];
+		$parts{"\L$row->[0]\E"}{interval} = $row->[5];
 		if ($self->{type} !~ /SHOW|TEST/) {
-			push(@{ $parts{"\L$row->[0]\E"}{columns} }, $row->[5]);
+			push(@{ $parts{"\L$row->[0]\E"}{columns} }, $row->[6]);
 		}
 	}
 	$sth->finish;
@@ -13874,18 +14366,21 @@ sub _convert_package
 	my $dirprefix = '';
 	$dirprefix = "$self->{output_dir}/" if ($self->{output_dir});
 	my $content = '';
+	my $package_ddl = '';
+	my $package_body_ddl = '';
+	my $file = '';
 
 	if ($self->{package_as_schema})
 	{
 		my $pname =  $self->quote_object_name($pkg);
 		$pname =~ s/^[^\.]+\.//;
 		$content .= "\nDROP SCHEMA $self->{pg_supports_ifexists} $pname CASCADE;\n";
-		$content .= "CREATE SCHEMA IF NOT EXISTS $pname;\n";
+		$package_ddl .= "CREATE SCHEMA IF NOT EXISTS $pname;\n";
 		if ($self->{force_owner})
 		{
 			$owner = $self->{force_owner} if ($self->{force_owner} ne "1");
 			if ($owner) {
-				$content .= "ALTER SCHEMA \L$pname\E OWNER TO " .  $self->quote_object_name($owner) . ";\n";
+				$package_ddl .= "ALTER SCHEMA \L$pname\E OWNER TO " .  $self->quote_object_name($owner) . ";\n";
 			}
 		}
 	}
@@ -13917,13 +14412,25 @@ sub _convert_package
 					}
 				}
 				$tpe->{code} =~ s/REPLACE type/REPLACE TYPE/;
-				$content .= $tpe->{code} . "\n";
+				$package_ddl .= $tpe->{code} . "\n";
 				$i++;
 			}
-			$content .= join("\n", @cursors) . "\n";
+			$package_ddl .= join("\n", @cursors) . "\n";
 			$glob_declare = $self->register_global_variable($pname, $glob_declare);
 		}
 		@{$self->{types}} = ();
+	}
+
+	if ($self->{openGauss}) {
+		my $fhdl = $self->open_export_file("$self->{packages}{$pkg}{package_object_id}.sql");
+		$self->set_binmode($fhdl) if (!$self->{compress});
+		$self->dump($package_ddl, $fhdl);
+		$self->close_export_file($fhdl);
+
+		my $f = "$self->{output_dir}/$self->{packages}{$pkg}{package_object_id}.sql";
+		$content .= "\\i$self->{psql_relative_path} $f\n";
+	} else {
+		$content .= $package_ddl;
 	}
 
 	# Convert the package body part
@@ -13964,7 +14471,7 @@ sub _convert_package
 			$content .= join("\n", @cursors) . "\n";
 			$glob_declare = $self->register_global_variable($pname, $glob_declare);
 		}
-		if ($self->{file_per_function})
+		if ($self->{file_per_function} && !$self->{openGauss})
 		{
 			my $dir = lc("$dirprefix$pname");
 			if (!-d "$dir") {
@@ -14012,7 +14519,25 @@ sub _convert_package
 		foreach my $f (@functions)
 		{
 			next if (!$f);
-			$content .= $self->_convert_function($owner, $f, $pkg || $pname);
+			if ($self->{openGauss}) {
+				my $temp = "CREATE$self->{create_or_replace} " . $f;
+				$temp =~ s/(.*?)\b(FUNCTION|PROCEDURE)\s+([^\s\(]+)\s*(\([^\)]*\))/$1$2 $pname.$3 $4/is;
+				$package_body_ddl .= $temp . "\n";
+			} else {
+				$package_body_ddl .= $self->_convert_function($owner, $f, $pkg || $pname);
+			}
+		}
+
+		if ($self->{openGauss}) {
+			my $reportFile = new IO::File;
+			my $file = "$self->{output_dir}/$self->{packages}{$pkg}{package_body_object_id}.sql";
+			$reportFile->open(">$file") or $self->logit("FATAL: Can't open $file: $!\n", 0, 1);
+			$reportFile->autoflush(1) if (defined $reportFile);
+			$self->dump($package_body_ddl, $reportFile);
+			$self->close_export_file($reportFile);
+			$content .= "\\i$self->{psql_relative_path} $file";
+		} else {
+			$content .= $package_body_ddl;
 		}
 		if ($self->{estimate_cost}) {
 			$self->{total_pkgcost} += $self->{pkgcost} || 0;
