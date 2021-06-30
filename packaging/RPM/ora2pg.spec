@@ -1,17 +1,16 @@
 Summary:	Oracle to PostgreSQL database schema converter
-Name:		ora2pg
-Version:	18.0
+Name:		ora2og
+Version:	1.0
 Release:	1%{?dist}
 Group:		Applications/Databases
 License:	GPLv3+
 URL:		http://ora2pg.darold.net/
-Source0:	https://github.com/darold/%{name}/archive/v%{version}.tar.gz
-BuildRoot:	%{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
+Source0:	https://github.com/darold/ora2pg/archive/v%{version}.tar.gz
+BuildRoot:	%{_tmppath}/ora2pg-%{version}-%{release}-root-%(%{__id_u} -n)
 BuildArch:	noarch
 
 BuildRequires:	perl
-Requires:	perl(DBD::Oracle)
-Requires:	perl-DBD-MySQL perl(DBI) perl(IO::Compress::Base)
+Requires:	perl(DBI) perl(IO::Compress::Base)
 
 %description
 This package contains a Perl module and a companion script to convert an
@@ -27,7 +26,7 @@ Oracle database to a PostgreSQL database.
     INSTALLDIRS=vendor \
     QUIET=1 \
     CONFDIR=%{_sysconfdir} \
-    DOCDIR=%{_docdir}/%{name}-%{version} \
+    DOCDIR=%{_docdir}/ora2pg-%{version} \
     DESTDIR=%{buildroot}
 %{__make}
 
@@ -45,16 +44,16 @@ Oracle database to a PostgreSQL database.
 
 %files
 %defattr(-, root, root, 0755)
-%attr(0755,root,root) %{_bindir}/%{name}
-%attr(0755,root,root) %{_bindir}/%{name}_scanner
-%attr(0644,root,root) %{_mandir}/man3/%{name}.3.gz
-%config(noreplace) %{_sysconfdir}/%{name}.conf.dist
-#%config(noreplace) %{_sysconfdir}/%{name}/%{name}.conf.dist
+%attr(0755,root,root) %{_bindir}/ora2pg
+%attr(0755,root,root) %{_bindir}/ora2pg_scanner
+%attr(0644,root,root) %{_mandir}/man3/ora2pg.3.gz
+%config(noreplace) %{_sysconfdir}/ora2pg.conf.dist
+#%config(noreplace) %{_sysconfdir}/ora2pg/ora2pg.conf.dist
 %{perl_vendorlib}/Ora2Pg/MySQL.pm
 %{perl_vendorlib}/Ora2Pg/PLSQL.pm
 %{perl_vendorlib}/Ora2Pg/GEOM.pm
 %{perl_vendorlib}/Ora2Pg.pm
-%{_docdir}/%{name}-%{version}/*
+%{_docdir}/ora2pg-%{version}/*
 
 %changelog
 * Tue Jan 31 2017 Devrim Gündüz <devrim@gunduz.org> 18.0-1
