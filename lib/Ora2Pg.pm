@@ -6066,7 +6066,13 @@ sub export_package
 			# If there is a declaration only do not go further than looking at global var
 			if (!$self->{packages}{$pkg}{text})
 			{
-				$self->_convert_package($pkg);
+				$pkgbody = $self->_convert_package($pkg);
+				if ($self->{openGauss}) {
+					$sql_output .= "\n\n-- Oracle package '$pkg' declaration, please edit to match PostgreSQL syntax.\n";
+					$sql_output .= $pkgbody . "\n";
+					$sql_output .= "-- End of Oracle package '$pkg' declaration\n\n";
+					$nothing++;
+				}
 				$i++;
 				next;
 			}
@@ -7173,8 +7179,7 @@ sub export_synonym
 		%synonym_detail = (%synonym_detail, "$self->{synonyms}{$syn}{object_id}" => \%detail);
 		if ($self->{openGauss}) {
 			$ddl = "CREATE$self->{create_or_replace} SYNONYM " . $self->quote_object_name("$syn") . " FOR ";
-			my $object_name = "$self->{synonyms}{$syn}{table_owner}." if $self->{synonyms}{$syn}{table_owner};
-			$object_name .= "$self->{synonyms}{$syn}{table_name}";
+			my $object_name = "$self->{synonyms}{$syn}{table_name}";
 			$ddl .= $self->quote_object_name($object_name);
 			if ($self->{synonyms}{$syn}{dblink}) {
 				$sql_output .= "-- You need to create foreign table $self->{synonyms}{$syn}{table_owner}.$self->{synonyms}{$syn}{table_name} using foreign server: $self->{synonyms}{$syn}{dblink} (see DBLINK and FDW export type)\n";
@@ -7789,7 +7794,7 @@ sub export_table
 		}
 		$ib++;
 
-		if ($self->{openGauss} && $#{$self->{tables}{$table}{foreign_key}} >= 0) {
+		if ($self->{openGauss} && $#{$self->{tables}{$table}{foreign_key}} >= 0 && !$self->{file_per_fkeys}) {
 			$self->logit("Dumping RI $table...\n", 1);
 			# Add constraint definition
 			if ($self->{type} ne 'FDW') {
@@ -7917,8 +7922,9 @@ RETURNS text AS
 	}
 
 	# Dumping foreign key constraints
-	if (!$self->{openGauss}) {
-		my $fkeys = '';
+	my $fkeys = '';
+	if (!$self->{openGauss} || $self->{file_per_fkeys})
+	{
 		foreach my $table (sort keys %{$self->{tables}})
 		{
 			next if ($#{$self->{tables}{$table}{foreign_key}} < 0);
